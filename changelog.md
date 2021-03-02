@@ -111,6 +111,10 @@ with other backends. see #9125. Use `-d:nimLegacyJsRound` for previous behavior.
 
 - Removed the optional `longestMatch` parameter of the `critbits._WithPrefix` iterators (it never worked reliably)
 
+- Added `initDateTime` in `times` to create a datetime from weekday, ISO 8601 week number and year.
+- Added `getWeekInYear` in `times` to get ISO 8601 week number from datetime.
+- Added `getWeeksInYear` in `times` to number of ISO 8601 weeks in a year
+
 ## Language changes
 
 - `nimscript` now handles `except Exception as e`.
