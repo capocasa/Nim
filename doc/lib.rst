@@ -39,7 +39,7 @@ Automatic imports
   Basic Nim thread support. **Note:** This is part of the system module. Do not
   import it explicitly. Enabled with ``--threads:on``.
 
-* `channels <channels.html>`_
+* `channels <channels_builtin.html>`_
   Nim message passing support for threads. **Note:** This is part of the
   system module. Do not import it explicitly. Enabled with ``--threads:on``.
 
@@ -85,10 +85,15 @@ Algorithms
 * `algorithm <algorithm.html>`_
   This module implements some common generic algorithms like sort or binary search.
 
+* `std/enumutils <enumutils.html>`_
+  This module adds functionality for the built-in ``enum`` type.
+
 * `sequtils <sequtils.html>`_
-  This module implements operations for the built-in seq type
+  This module implements operations for the built-in ``seq`` type
   which were inspired by functional programming languages.
 
+* `std/setutils <setutils.html>`_
+  This module adds functionality for the built-in ``set`` type.
 
 
 Collections
@@ -115,7 +120,7 @@ Collections
 * `options <options.html>`_
   The option type encapsulates an optional value.
 
-* `packedsets <packedsets.html>`_
+* `std/packedsets <packedsets.html>`_
   Efficient implementation of a set of ordinals as a sparse bit set.
 
 * `sets <sets.html>`_
@@ -129,7 +134,6 @@ Collections
 
 * `tables <tables.html>`_
   Nim hash table support. Contains tables, ordered tables, and count tables.
-
 
 
 String handling
@@ -196,7 +200,7 @@ Time handling
 -------------
 
 * `std/monotimes <monotimes.html>`_
-  The `monotimes` module implements monotonic timestamps.
+  The ``monotimes`` module implements monotonic timestamps.
 
 * `times <times.html>`_
   The ``times`` module contains support for working with time.
@@ -234,8 +238,8 @@ Generic Operating System Services
 
 * `streams <streams.html>`_
   This module provides a stream interface and two implementations thereof:
-  the `FileStream` and the `StringStream` which implement the stream
-  interface for Nim file objects (`File`) and strings. Other modules
+  the ``FileStream`` and the ``StringStream`` which implement the stream
+  interface for Nim file objects (``File``) and strings. Other modules
   may provide other implementations for this standard stream interface.
 
 * `terminal <terminal.html>`_
@@ -263,6 +267,9 @@ Math libraries
 * `random <random.html>`_
   Fast and tiny random number generator.
 
+* `std/sysrand <sysrand.html>`_
+  Cryptographically secure pseudorandom number generator.
+
 * `rationals <rationals.html>`_
   This module implements rational numbers and relevant mathematical operations.
 
@@ -270,7 +277,7 @@ Math libraries
   Statistical analysis
 
 * `std/sums <sums.html>`_
-  Fast summation functions.
+  Accurate summation functions.
 
 
 Internet Protocols and Support
@@ -296,7 +303,7 @@ Internet Protocols and Support
   module.
 
 * `asyncstreams <asyncstreams.html>`_
-  This module provides `FutureStream` - a future that acts as a queue.
+  This module provides ``FutureStream`` - a future that acts as a queue.
 
 * `cgi <cgi.html>`_
   This module implements helpers for CGI applications.
@@ -411,7 +418,6 @@ Generators
   that generates a string with its HTML representation.
 
 
-
 Hashing
 -------
 
@@ -433,7 +439,6 @@ Hashing
 
 * `std/sha1 <sha1.html>`_
   This module implements a sha1 encoder and decoder.
-
 
 
 Miscellaneous
@@ -535,6 +540,7 @@ UNIX specific
   Contains a wrapper for the POSIX standard.
 * `posix_utils <posix_utils.html>`_
   Contains helpers for the POSIX standard or specialized for Linux and BSDs.
+
 
 Regular expressions
 -------------------

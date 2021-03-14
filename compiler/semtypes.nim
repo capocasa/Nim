@@ -151,9 +151,10 @@ proc semEnum(c: PContext, n: PNode, prev: PType): PType =
       wrongRedefinition(c, e.info, e.name.s, conflict.info)
     inc(counter)
   if isPure and sfExported in result.sym.flags:
-    addPureEnum(c, result.sym)
+    addPureEnum(c, LazySym(sym: result.sym))
   if tfNotNil in e.typ.flags and not hasNull:
     result.flags.incl tfRequiresInit
+  setToStringProc(c.graph, result, genEnumToStrProc(result, n.info, c.graph, c.idgen))
 
 proc semSet(c: PContext, n: PNode, prev: PType): PType =
   result = newOrPrevType(tySet, prev, c)
@@ -199,7 +200,9 @@ proc semVarargs(c: PContext, n: PNode, prev: PType): PType =
 proc semVarOutType(c: PContext, n: PNode, prev: PType; kind: TTypeKind): PType =
   if n.len == 1:
     result = newOrPrevType(kind, prev, c)
-    var base = semTypeNode(c, n[0], nil).skipTypes({tyTypeDesc})
+    var base = semTypeNode(c, n[0], nil)
+    if base.kind == tyTypeDesc and not isSelf(base):
+      base = base[0]
     if base.kind == tyVar:
       localError(c.config, n.info, "type 'var var' is not allowed")
       base = base[0]
@@ -1024,7 +1027,7 @@ proc liftParamType(c: PContext, procKind: TSymKind, genericParams: PNode,
   var paramTypId = if not anon and paramType.sym != nil: paramType.sym.name
                    else: nil
 
-  case paramType.kind:
+  case paramType.kind
   of tyAnything:
     result = addImplicitGeneric(c, newTypeS(tyGenericParam, c), nil, info, genericParams, paramName)
 
@@ -1117,6 +1120,8 @@ proc liftParamType(c: PContext, procKind: TSymKind, genericParams: PNode,
   of tyGenericInst:
     if paramType.lastSon.kind == tyUserTypeClass:
       var cp = copyType(paramType, nextTypeId c.idgen, getCurrOwner(c))
+      copyTypeProps(c.graph, c.idgen.module, cp, paramType)
+
       cp.kind = tyUserTypeClassInst
       return addImplicitGeneric(c, cp, paramTypId, info, genericParams, paramName)
 
@@ -1151,7 +1156,7 @@ proc liftParamType(c: PContext, procKind: TSymKind, genericParams: PNode,
       result = recurse(expanded, true)
 
   of tyUserTypeClasses, tyBuiltInTypeClass, tyCompositeTypeClass,
-     tyAnd, tyOr, tyNot:
+     tyAnd, tyOr, tyNot, tyConcept:
     result = addImplicitGeneric(c,
         copyType(paramType, nextTypeId c.idgen, getCurrOwner(c)), paramTypId,
         info, genericParams, paramName)
@@ -1343,7 +1348,7 @@ proc semProcTypeNode(c: PContext, n, genericParams: PNode,
         r = skipIntLit(r, c.idgen)
         if kind == skIterator:
           # see tchainediterators
-          # in cases like iterator foo(it: iterator): type(it)
+          # in cases like iterator foo(it: iterator): typeof(it)
           # we don't need to change the return type to iter[T]
           result.flags.incl tfIterator
           # XXX Would be nice if we could get rid of this
@@ -1530,6 +1535,7 @@ proc semTypeExpr(c: PContext, n: PNode; prev: PType): PType =
 proc freshType(c: PContext; res, prev: PType): PType {.inline.} =
   if prev.isNil:
     result = copyType(res, nextTypeId c.idgen, res.owner)
+    copyTypeProps(c.graph, c.idgen.module, result, res)
   else:
     result = res
 
@@ -1544,6 +1550,12 @@ template modifierTypeKindOfNode(n: PNode): TTypeKind =
 
 proc semTypeClass(c: PContext, n: PNode, prev: PType): PType =
   # if n.len == 0: return newConstraint(c, tyTypeClass)
+  if isNewStyleConcept(n):
+    result = newOrPrevType(tyConcept, prev, c)
+    result.flags.incl tfCheckedForDestructor
+    result.n = semConceptDeclaration(c, n)
+    return result
+
   let
     pragmas = n[1]
     inherited = n[2]
@@ -1700,7 +1712,7 @@ proc semTypeNode(c: PContext, n: PNode, prev: PType): PType =
   case n.kind
   of nkEmpty: result = n.typ
   of nkTypeOfExpr:
-    # for ``type(countup(1,3))``, see ``tests/ttoseq``.
+    # for ``typeof(countup(1,3))``, see ``tests/ttoseq``.
     checkSonsLen(n, 1, c.config)
     result = semTypeof(c, n[0], prev)
     if result.kind == tyTypeDesc: result.flags.incl tfExplicit
@@ -1843,7 +1855,9 @@ proc semTypeNode(c: PContext, n: PNode, prev: PType): PType =
     of mExpr:
       result = semTypeNode(c, n[0], nil)
       if result != nil:
+        let old = result
         result = copyType(result, nextTypeId c.idgen, getCurrOwner(c))
+        copyTypeProps(c.graph, c.idgen.module, result, old)
         for i in 1..<n.len:
           result.rawAddSon(semTypeNode(c, n[i], nil))
     of mDistinct:
@@ -2117,12 +2131,16 @@ proc semGenericParamList(c: PContext, n: PNode, father: PType = nil): PNode =
       typ.flags.incl tfGenericTypeParam
 
       for j in 0..<a.len-2:
-        let finalType = if j == 0: typ
-                        else: copyType(typ, nextTypeId c.idgen, typ.owner)
-                        # it's important the we create an unique
-                        # type for each generic param. the index
-                        # of the parameter will be stored in the
-                        # attached symbol.
+        var finalType: PType
+        if j == 0:
+          finalType = typ
+        else:
+          finalType = copyType(typ, nextTypeId c.idgen, typ.owner)
+          copyTypeProps(c.graph, c.idgen.module, finalType, typ)
+        # it's important the we create an unique
+        # type for each generic param. the index
+        # of the parameter will be stored in the
+        # attached symbol.
         var paramName = a[j]
         var covarianceFlag = tfUnresolved
 

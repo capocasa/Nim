@@ -11,7 +11,7 @@ import std / [hashes, tables, intsets, sha1]
 import packed_ast, bitabs, rodfiles
 import ".." / [ast, idents, lineinfos, msgs, ropes, options,
   pathutils, condsyms]
-
+#import ".." / [renderer, astalgo]
 from std / os import removeFile, isAbsolute
 
 type
@@ -32,9 +32,16 @@ type
     #producedGenerics*: Table[GenericKey, SymId]
     exports*: seq[(LitId, int32)]
     reexports*: seq[(LitId, PackedItemId)]
-    compilerProcs*, trmacros*, converters*, pureEnums*: seq[(LitId, int32)]
-    methods*: seq[(LitId, PackedItemId, int32)]
+    compilerProcs*: seq[(LitId, int32)]
+    converters*, methods*, trmacros*, pureEnums*: seq[int32]
     macroUsages*: seq[(PackedItemId, PackedLineInfo)]
+
+    typeInstCache*: seq[(PackedItemId, PackedItemId)]
+    procInstCache*: seq[PackedInstantiation]
+    attachedOps*: seq[(TTypeAttachedOp, PackedItemId, PackedItemId)]
+    methodsPerType*: seq[(PackedItemId, int, PackedItemId)]
+    enumToStringProcs*: seq[(PackedItemId, PackedItemId)]
+
     sh*: Shared
     cfg: PackedConfig
 
@@ -49,6 +56,9 @@ type
     typeMarker*: IntSet #Table[ItemId, TypeId]  # ItemId.item -> TypeId
     symMarker*: IntSet #Table[ItemId, SymId]    # ItemId.item -> SymId
     config*: ConfigRef
+
+proc isActive*(e: PackedEncoder): bool = e.config != nil
+proc disable*(e: var PackedEncoder) = e.config = nil
 
 template primConfigFields(fn: untyped) {.dirty.} =
   fn backend
@@ -107,7 +117,7 @@ proc toLitId(x: FileIndex; c: var PackedEncoder; m: var PackedModule): LitId =
     c.lastLit = result
     assert result != LitId(0)
 
-proc toFileIndex(x: LitId; m: PackedModule; config: ConfigRef): FileIndex =
+proc toFileIndex*(x: LitId; m: PackedModule; config: ConfigRef): FileIndex =
   result = msgs.fileInfoIdx(config, AbsoluteFile m.sh.strings[x])
 
 proc includesIdentical(m: var PackedModule; config: ConfigRef): bool =
@@ -147,22 +157,17 @@ proc addExported*(c: var PackedEncoder; m: var PackedModule; s: PSym) =
   m.exports.add((nameId, s.itemId.item))
 
 proc addConverter*(c: var PackedEncoder; m: var PackedModule; s: PSym) =
-  let nameId = getOrIncl(m.sh.strings, s.name.s)
-  m.converters.add((nameId, s.itemId.item))
+  m.converters.add(s.itemId.item)
 
 proc addTrmacro*(c: var PackedEncoder; m: var PackedModule; s: PSym) =
-  let nameId = getOrIncl(m.sh.strings, s.name.s)
-  m.trmacros.add((nameId, s.itemId.item))
+  m.trmacros.add(s.itemId.item)
 
 proc addPureEnum*(c: var PackedEncoder; m: var PackedModule; s: PSym) =
-  let nameId = getOrIncl(m.sh.strings, s.name.s)
   assert s.kind == skType
-  m.pureEnums.add((nameId, s.itemId.item))
+  m.pureEnums.add(s.itemId.item)
 
 proc addMethod*(c: var PackedEncoder; m: var PackedModule; s: PSym) =
-  let nameId = getOrIncl(m.sh.strings, s.name.s)
-  discard "to do"
-  # c.m.methods.add((nameId, s.itemId.item))
+  m.methods.add s.itemId.item
 
 proc addReexport*(c: var PackedEncoder; m: var PackedModule; s: PSym) =
   let nameId = getOrIncl(m.sh.strings, s.name.s)
@@ -214,7 +219,8 @@ proc addMissing(c: var PackedEncoder; p: PSym) =
   ## consider queuing a symbol for later addition to the packed tree
   if p != nil and p.itemId.module == c.thisModule:
     if p.itemId.item notin c.symMarker:
-      c.pendingSyms.add p
+      if not (sfForward in p.flags and p.kind in routineKinds):
+        c.pendingSyms.add p
 
 proc addMissing(c: var PackedEncoder; p: PType) =
   ## consider queuing a type for later addition to the packed tree
@@ -280,16 +286,19 @@ proc storeType(t: PType; c: var PackedEncoder; m: var PackedModule): PackedItemI
       paddingAtEnd: t.paddingAtEnd, lockLevel: t.lockLevel)
     storeNode(p, t, n)
 
-    for op, s in pairs t.attachedOps:
-      c.addMissing s
-      p.attachedOps[op] = s.safeItemId(c, m)
+    when false:
+      for op, s in pairs t.attachedOps:
+        c.addMissing s
+        p.attachedOps[op] = s.safeItemId(c, m)
 
     p.typeInst = t.typeInst.storeType(c, m)
     for kid in items t.sons:
       p.types.add kid.storeType(c, m)
-    for i, s in items t.methods:
-      c.addMissing s
-      p.methods.add (i, s.safeItemId(c, m))
+
+    when false:
+      for i, s in items t.methods:
+        c.addMissing s
+        p.methods.add (i, s.safeItemId(c, m))
     c.addMissing t.sym
     p.sym = t.sym.safeItemId(c, m)
     c.addMissing t.owner
@@ -327,6 +336,8 @@ proc storeSym*(s: PSym; c: var PackedEncoder; m: var PackedModule): PackedItemId
     if s.itemId.item >= m.sh.syms.len:
       setLen m.sh.syms, s.itemId.item+1
 
+    assert sfForward notin s.flags
+
     var p = PackedSym(kind: s.kind, flags: s.flags, info: s.info.toPackedInfo(c, m), magic: s.magic,
       position: s.position, offset: s.offset, options: s.options,
       name: s.name.s.toLitId(m))
@@ -341,6 +352,7 @@ proc storeSym*(s: PSym; c: var PackedEncoder; m: var PackedModule): PackedItemId
       p.alignment = s.alignment
 
     p.externalName = toLitId(if s.loc.r.isNil: "" else: $s.loc.r, m)
+    p.locFlags = s.loc.flags
     c.addMissing s.typ
     p.typ = s.typ.storeType(c, m)
     c.addMissing s.owner
@@ -412,17 +424,40 @@ proc toPackedNode*(n: PNode; ir: var PackedTree; c: var PackedEncoder; m: var Pa
       toPackedNode(n[i], ir, c, m)
     ir.patch patchPos
 
+proc storeTypeInst*(c: var PackedEncoder; m: var PackedModule; s: PSym; inst: PType) =
+  m.typeInstCache.add (storeSymLater(s, c, m), storeTypeLater(inst, c, m))
+
 proc addPragmaComputation*(c: var PackedEncoder; m: var PackedModule; n: PNode) =
   toPackedNode(n, m.toReplay, c, m)
+
+proc toPackedProcDef(n: PNode; ir: var PackedTree; c: var PackedEncoder; m: var PackedModule) =
+  let info = toPackedInfo(n.info, c, m)
+  let patchPos = ir.prepare(n.kind, n.flags,
+                            storeTypeLater(n.typ, c, m), info)
+  for i in 0..<n.len:
+    if i != bodyPos:
+      toPackedNode(n[i], ir, c, m)
+    else:
+      # do not serialize the body of the proc, it's unnecessary since
+      # n[0].sym.ast has the sem'checked variant of it which is what
+      # everybody should use instead.
+      ir.nodes.add PackedNode(kind: nkEmpty, flags: {}, operand: 0,
+                              typeId: nilItemId, info: info)
+  ir.patch patchPos
 
 proc toPackedNodeIgnoreProcDefs(n: PNode, encoder: var PackedEncoder; m: var PackedModule) =
   case n.kind
   of routineDefs:
-    # we serialize n[namePos].sym instead
-    if n[namePos].kind == nkSym:
-      discard storeSym(n[namePos].sym, encoder, m)
-    else:
-      toPackedNode(n, m.topLevel, encoder, m)
+    toPackedProcDef(n, m.topLevel, encoder, m)
+    when false:
+      # we serialize n[namePos].sym instead
+      if n[namePos].kind == nkSym:
+        let s = n[namePos].sym
+        discard storeSym(s, encoder, m)
+        if s.flags * {sfExportc, sfCompilerProc, sfCompileTime} == {sfExportc}:
+          m.exportCProcs.add(s.itemId.item)
+      else:
+        toPackedNode(n, m.topLevel, encoder, m)
   of nkStmtList, nkStmtListExpr:
     for it in n:
       toPackedNodeIgnoreProcDefs(it, encoder, m)
@@ -433,24 +468,29 @@ proc toPackedNodeTopLevel*(n: PNode, encoder: var PackedEncoder; m: var PackedMo
   toPackedNodeIgnoreProcDefs(n, encoder, m)
   flush encoder, m
 
-proc storePrim*(f: var RodFile; x: PackedType) =
-  for y in fields(x):
-    when y is seq:
-      storeSeq(f, y)
-    else:
-      storePrim(f, y)
+proc toPackedGeneratedProcDef*(s: PSym, encoder: var PackedEncoder; m: var PackedModule) =
+  ## Generic procs and generated `=hook`'s need explicit top-level entries so
+  ## that the code generator can work without having to special case these. These
+  ## entries will also be useful for other tools and are the cleanest design
+  ## I can come up with.
+  assert s.kind in routineKinds
+  toPackedProcDef(s.ast, m.topLevel, encoder, m)
+  #flush encoder, m
 
-proc loadPrim*(f: var RodFile; x: var PackedType) =
-  for y in fields(x):
-    when y is seq:
-      loadSeq(f, y)
-    else:
-      loadPrim(f, y)
+proc storeInstantiation*(c: var PackedEncoder; m: var PackedModule; s: PSym; i: PInstantiation) =
+  var t = newSeq[PackedItemId](i.concreteTypes.len)
+  for j in 0..high(i.concreteTypes):
+    t[j] = storeTypeLater(i.concreteTypes[j], c, m)
+  m.procInstCache.add PackedInstantiation(key: storeSymLater(s, c, m),
+                                          sym: storeSymLater(i.sym, c, m),
+                                          concreteTypes: t)
+  toPackedGeneratedProcDef(i.sym, c, m)
 
 proc loadError(err: RodFileError; filename: AbsoluteFile) =
-  echo "Error: ", $err, "\nloading file: ", filename.string
+  echo "Error: ", $err, " loading file: ", filename.string
 
-proc loadRodFile*(filename: AbsoluteFile; m: var PackedModule; config: ConfigRef): RodFileError =
+proc loadRodFile*(filename: AbsoluteFile; m: var PackedModule; config: ConfigRef;
+                  ignoreConfig = false): RodFileError =
   m.sh = Shared()
   var f = rodfiles.open(filename.string)
   f.loadHeader()
@@ -459,7 +499,7 @@ proc loadRodFile*(filename: AbsoluteFile; m: var PackedModule; config: ConfigRef
   f.loadPrim m.definedSymbols
   f.loadPrim m.cfg
 
-  if f.err == ok and not configIdentical(m, config):
+  if f.err == ok and not configIdentical(m, config) and not ignoreConfig:
     f.err = configMismatch
 
   template loadSeqSection(section, data) {.dirty.} =
@@ -500,6 +540,12 @@ proc loadRodFile*(filename: AbsoluteFile; m: var PackedModule; config: ConfigRef
   loadSeqSection symsSection, m.sh.syms
   loadSeqSection typesSection, m.sh.types
 
+  loadSeqSection typeInstCacheSection, m.typeInstCache
+  loadSeqSection procInstCacheSection, m.procInstCache
+  loadSeqSection attachedOpsSection, m.attachedOps
+  loadSeqSection methodsPerTypeSection, m.methodsPerType
+  loadSeqSection enumToStringProcsSection, m.enumToStringProcs
+
   close(f)
   result = f.err
 
@@ -510,6 +556,7 @@ proc storeError(err: RodFileError; filename: AbsoluteFile) =
   removeFile(filename.string)
 
 proc saveRodFile*(filename: AbsoluteFile; encoder: var PackedEncoder; m: var PackedModule) =
+  flush encoder, m
   #rememberConfig(encoder, encoder.config)
 
   var f = rodfiles.create(filename.string)
@@ -554,7 +601,15 @@ proc saveRodFile*(filename: AbsoluteFile; encoder: var PackedEncoder; m: var Pac
   storeSeqSection symsSection, m.sh.syms
 
   storeSeqSection typesSection, m.sh.types
+
+  storeSeqSection typeInstCacheSection, m.typeInstCache
+  storeSeqSection procInstCacheSection, m.procInstCache
+  storeSeqSection attachedOpsSection, m.attachedOps
+  storeSeqSection methodsPerTypeSection, m.methodsPerType
+  storeSeqSection enumToStringProcsSection, m.enumToStringProcs
+
   close(f)
+  encoder.disable()
   if f.err != ok:
     storeError(f.err, filename)
 
@@ -568,11 +623,11 @@ proc saveRodFile*(filename: AbsoluteFile; encoder: var PackedEncoder; m: var Pac
 
 type
   PackedDecoder* = object
-    lastModule*: int
-    lastLit*: LitId
-    lastFile*: FileIndex # remember the last lookup entry.
+    lastModule: int
+    lastLit: LitId
+    lastFile: FileIndex # remember the last lookup entry.
     config*: ConfigRef
-    cache: IdentCache
+    cache*: IdentCache
 
 type
   ModuleStatus* = enum
@@ -596,7 +651,7 @@ type
 proc loadType(c: var PackedDecoder; g: var PackedModuleGraph; thisModule: int; t: PackedItemId): PType
 proc loadSym(c: var PackedDecoder; g: var PackedModuleGraph; thisModule: int; s: PackedItemId): PSym
 
-proc toFileIndexCached(c: var PackedDecoder; g: var PackedModuleGraph; thisModule: int; f: LitId): FileIndex =
+proc toFileIndexCached*(c: var PackedDecoder; g: PackedModuleGraph; thisModule: int; f: LitId): FileIndex =
   if c.lastLit == f and c.lastModule == thisModule:
     result = c.lastFile
   else:
@@ -611,8 +666,8 @@ proc translateLineInfo(c: var PackedDecoder; g: var PackedModuleGraph; thisModul
   result = TLineInfo(line: x.line, col: x.col,
             fileIndex: toFileIndexCached(c, g, thisModule, x.file))
 
-proc loadNodes(c: var PackedDecoder; g: var PackedModuleGraph; thisModule: int;
-               tree: PackedTree; n: NodePos): PNode =
+proc loadNodes*(c: var PackedDecoder; g: var PackedModuleGraph; thisModule: int;
+                tree: PackedTree; n: NodePos): PNode =
   let k = n.kind
   if k == nkNilRodNode:
     return nil
@@ -646,6 +701,14 @@ proc loadNodes(c: var PackedDecoder; g: var PackedModuleGraph; thisModule: int;
   else:
     for n0 in sonsReadonly(tree, n):
       result.addAllowNil loadNodes(c, g, thisModule, tree, n0)
+
+proc initPackedDecoder*(config: ConfigRef; cache: IdentCache): PackedDecoder =
+  result = PackedDecoder(
+    lastModule: int32(-1),
+    lastLit: LitId(0),
+    lastFile: FileIndex(-1),
+    config: config,
+    cache: cache)
 
 proc loadProcHeader(c: var PackedDecoder; g: var PackedModuleGraph; thisModule: int;
                     tree: PackedTree; n: NodePos): PNode =
@@ -725,6 +788,7 @@ proc symBodyFromPacked(c: var PackedDecoder; g: var PackedModuleGraph;
   let externalName = g[si].fromDisk.sh.strings[s.externalName]
   if externalName != "":
     result.loc.r = rope externalName
+  result.loc.flags = s.locFlags
 
 proc loadSym(c: var PackedDecoder; g: var PackedModuleGraph; thisModule: int; s: PackedItemId): PSym =
   if s == nilItemId:
@@ -761,14 +825,16 @@ proc typeBodyFromPacked(c: var PackedDecoder; g: var PackedModuleGraph;
                         t: PackedType; si, item: int32; result: PType) =
   result.sym = loadSym(c, g, si, t.sym)
   result.owner = loadSym(c, g, si, t.owner)
-  for op, item in pairs t.attachedOps:
-    result.attachedOps[op] = loadSym(c, g, si, item)
+  when false:
+    for op, item in pairs t.attachedOps:
+      result.attachedOps[op] = loadSym(c, g, si, item)
   result.typeInst = loadType(c, g, si, t.typeInst)
   for son in items t.types:
     result.sons.add loadType(c, g, si, son)
   loadAstBody(t, n)
-  for gen, id in items t.methods:
-    result.methods.add((gen, loadSym(c, g, si, id)))
+  when false:
+    for gen, id in items t.methods:
+      result.methods.add((gen, loadSym(c, g, si, id)))
 
 proc loadType(c: var PackedDecoder; g: var PackedModuleGraph; thisModule: int; t: PackedItemId): PType =
   if t == nilItemId:
@@ -791,6 +857,17 @@ proc loadType(c: var PackedDecoder; g: var PackedModuleGraph; thisModule: int; t
       result = g[si].types[t.item]
     assert result.itemId.item > 0
 
+proc newPackage(config: ConfigRef; cache: IdentCache; fileIdx: FileIndex): PSym =
+  let filename = AbsoluteFile toFullPath(config, fileIdx)
+  let name = getIdent(cache, splitFile(filename).name)
+  let info = newLineInfo(fileIdx, 1, 1)
+  let
+    pck = getPackageName(config, filename.string)
+    pck2 = if pck.len > 0: pck else: "unknown"
+    pack = getIdent(cache, pck2)
+  result = newSym(skPackage, getIdent(cache, pck2),
+    ItemId(module: PackageModuleId, item: int32(fileIdx)), nil, info)
+
 proc setupLookupTables(g: var PackedModuleGraph; conf: ConfigRef; cache: IdentCache;
                        fileIdx: FileIndex; m: var LoadedModule) =
   m.iface = initTable[PIdent, seq[PackedItemId]]()
@@ -808,6 +885,9 @@ proc setupLookupTables(g: var PackedModuleGraph; conf: ConfigRef; cache: IdentCa
                   name: getIdent(cache, splitFile(filename).name),
                   info: newLineInfo(fileIdx, 1, 1),
                   position: int(fileIdx))
+  m.module.owner = newPackage(conf, cache, fileIdx)
+  if fileIdx == conf.projectMainIdx2:
+    m.module.flags.incl sfMainModule
 
 proc loadToReplayNodes(g: var PackedModuleGraph; conf: ConfigRef; cache: IdentCache;
                        fileIdx: FileIndex; m: var LoadedModule) =
@@ -819,14 +899,11 @@ proc loadToReplayNodes(g: var PackedModuleGraph; conf: ConfigRef; cache: IdentCa
       lastFile: FileIndex(-1),
       config: conf,
       cache: cache)
-    var p = 0
-    while p < m.fromDisk.toReplay.len:
-      m.module.ast.add loadNodes(decoder, g, int(fileIdx), m.fromDisk.toReplay, NodePos p)
-      let s = span(m.fromDisk.toReplay, p)
-      inc p, s
+    for p in allNodes(m.fromDisk.toReplay):
+      m.module.ast.add loadNodes(decoder, g, int(fileIdx), m.fromDisk.toReplay, p)
 
 proc needsRecompile(g: var PackedModuleGraph; conf: ConfigRef; cache: IdentCache;
-                    fileIdx: FileIndex): bool =
+                    fileIdx: FileIndex; cachedModules: var seq[FileIndex]): bool =
   # Does the file belong to the fileIdx need to be recompiled?
   let m = int(fileIdx)
   if m >= g.len:
@@ -839,22 +916,26 @@ proc needsRecompile(g: var PackedModuleGraph; conf: ConfigRef; cache: IdentCache
     let rod = toRodFile(conf, AbsoluteFile fullpath)
     let err = loadRodFile(rod, g[m].fromDisk, conf)
     if err == ok:
-      result = false
+      result = optForceFullMake in conf.globalOptions
       # check its dependencies:
       for dep in g[m].fromDisk.imports:
         let fid = toFileIndex(dep, g[m].fromDisk, conf)
         # Warning: we need to traverse the full graph, so
         # do **not use break here**!
-        if needsRecompile(g, conf, cache, fid):
+        if needsRecompile(g, conf, cache, fid, cachedModules):
           result = true
 
       if not result:
         setupLookupTables(g, conf, cache, fileIdx, g[m])
-      g[m].status = if result: outdated else: loaded
+        cachedModules.add fileIdx
+        g[m].status = loaded
+      else:
+        g[m] = LoadedModule(status: outdated, module: g[m].module)
     else:
       loadError(err, rod)
       g[m].status = outdated
       result = true
+    when false: loadError(err, rod)
   of loading, loaded:
     # For loading: Assume no recompile is required.
     result = false
@@ -862,14 +943,16 @@ proc needsRecompile(g: var PackedModuleGraph; conf: ConfigRef; cache: IdentCache
     result = true
 
 proc moduleFromRodFile*(g: var PackedModuleGraph; conf: ConfigRef; cache: IdentCache;
-                        fileIdx: FileIndex): PSym =
+                        fileIdx: FileIndex; cachedModules: var seq[FileIndex]): PSym =
   ## Returns 'nil' if the module needs to be recompiled.
-  if needsRecompile(g, conf, cache, fileIdx):
+  if needsRecompile(g, conf, cache, fileIdx, cachedModules):
     result = nil
   else:
     result = g[int fileIdx].module
     assert result != nil
-    loadToReplayNodes(g, conf, cache, fileIdx, g[int fileIdx])
+    assert result.position == int(fileIdx)
+    for m in cachedModules:
+      loadToReplayNodes(g, conf, cache, m, g[int m])
 
 template setupDecoder() {.dirty.} =
   var decoder = PackedDecoder(
@@ -891,6 +974,42 @@ proc loadProcBody*(config: ConfigRef, cache: IdentCache;
   let pos = g[mId].fromDisk.sh.syms[s.itemId.item].ast
   assert pos != emptyNodeId
   result = loadProcBody(decoder, g, mId, g[mId].fromDisk.bodies, NodePos pos)
+
+proc loadTypeFromId*(config: ConfigRef, cache: IdentCache;
+                     g: var PackedModuleGraph; module: int; id: PackedItemId): PType =
+  if id.item < g[module].types.len:
+    result = g[module].types[id.item]
+  else:
+    result = nil
+  if result == nil:
+    var decoder = PackedDecoder(
+      lastModule: int32(-1),
+      lastLit: LitId(0),
+      lastFile: FileIndex(-1),
+      config: config,
+      cache: cache)
+    result = loadType(decoder, g, module, id)
+
+proc loadSymFromId*(config: ConfigRef, cache: IdentCache;
+                    g: var PackedModuleGraph; module: int; id: PackedItemId): PSym =
+  if id.item < g[module].syms.len:
+    result = g[module].syms[id.item]
+  else:
+    result = nil
+  if result == nil:
+    var decoder = PackedDecoder(
+      lastModule: int32(-1),
+      lastLit: LitId(0),
+      lastFile: FileIndex(-1),
+      config: config,
+      cache: cache)
+    result = loadSym(decoder, g, module, id)
+
+proc translateId*(id: PackedItemId; g: PackedModuleGraph; thisModule: int; config: ConfigRef): ItemId =
+  if id.module == LitId(0):
+    ItemId(module: thisModule.int32, item: id.item)
+  else:
+    ItemId(module: toFileIndex(id.module, g[thisModule].fromDisk, config).int32, item: id.item)
 
 proc checkForHoles(m: PackedModule; config: ConfigRef; moduleId: int) =
   var bugs = 0
@@ -979,18 +1098,30 @@ proc interfaceSymbol*(config: ConfigRef, cache: IdentCache;
   let values = g[int module].iface.getOrDefault(name)
   result = loadSym(decoder, g, int(module), values[0])
 
+proc idgenFromLoadedModule*(m: LoadedModule): IdGenerator =
+  IdGenerator(module: m.module.itemId.module, symId: int32 m.fromDisk.sh.syms.len,
+              typeId: int32 m.fromDisk.sh.types.len)
+
+proc searchForCompilerproc*(m: LoadedModule; name: string): int32 =
+  # slow, linear search, but the results are cached:
+  for it in items(m.fromDisk.compilerProcs):
+    if m.fromDisk.sh.strings[it[0]] == name:
+      return it[1]
+  return -1
+
 # ------------------------- .rod file viewer ---------------------------------
 
 proc rodViewer*(rodfile: AbsoluteFile; config: ConfigRef, cache: IdentCache) =
   var m: PackedModule
-  if loadRodFile(rodfile, m, config) != ok:
-    echo "Error: could not load: ", rodfile.string
+  let err = loadRodFile(rodfile, m, config, ignoreConfig=true)
+  if err != ok:
+    echo "Error: could not load: ", rodfile.string, " reason: ", err
     quit 1
 
   when true:
     echo "exports:"
     for ex in m.exports:
-      echo "  ", m.sh.strings[ex[0]]
+      echo "  ", m.sh.strings[ex[0]], " local ID: ", ex[1]
       assert ex[0] == m.sh.syms[ex[1]].name
       # ex[1] int32
 
@@ -998,6 +1129,11 @@ proc rodViewer*(rodfile: AbsoluteFile; config: ConfigRef, cache: IdentCache) =
     for ex in m.reexports:
       echo "  ", m.sh.strings[ex[0]]
     #  reexports*: seq[(LitId, PackedItemId)]
+
+  echo "all symbols"
+  for i in 0..high(m.sh.syms):
+    echo "  ", m.sh.strings[m.sh.syms[i].name], " local ID: ", i
+
   echo "symbols: ", m.sh.syms.len, " types: ", m.sh.types.len,
     " top level nodes: ", m.topLevel.nodes.len, " other nodes: ", m.bodies.nodes.len,
     " strings: ", m.sh.strings.len, " integers: ", m.sh.integers.len,

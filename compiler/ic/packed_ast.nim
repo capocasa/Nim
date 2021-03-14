@@ -62,6 +62,7 @@ type
     position*: int
     offset*: int
     externalName*: LitId # instead of TLoc
+    locFlags*: TLocFlags
     annex*: PackedLib
     when hasFFI:
       cname*: LitId
@@ -74,11 +75,9 @@ type
     flags*: TTypeFlags
     types*: seq[PackedItemId]
     n*: NodeId
-    methods*: seq[(int, PackedItemId)]
     #nodeflags*: TNodeFlags
     sym*: PackedItemId
     owner*: PackedItemId
-    attachedOps*: array[TTypeAttachedOp, PackedItemId]
     size*: BiggestInt
     align*: int16
     paddingAtEnd*: int16
@@ -110,6 +109,10 @@ type
     integers*: BiTable[BiggestInt]
     floats*: BiTable[BiggestFloat]
     #config*: ConfigRef
+
+  PackedInstantiation* = object
+    key*, sym*: PackedItemId
+    concreteTypes*: seq[PackedItemId]
 
 proc `==`*(a, b: SymId): bool {.borrow.}
 proc hash*(a: SymId): Hash {.borrow.}
@@ -290,6 +293,9 @@ template typ*(n: NodePos): PackedItemId =
 template flags*(n: NodePos): TNodeFlags =
   tree.nodes[n.int].flags
 
+template operand*(n: NodePos): int32 =
+  tree.nodes[n.int].operand
+
 proc span*(tree: PackedTree; pos: int): int {.inline.} =
   if isAtom(tree, pos): 1 else: tree.nodes[pos].operand
 
@@ -451,3 +457,13 @@ when false:
     dest.add nkStrLit, msg, n.info
     copyTree(dest, tree, n)
     patch dest, patchPos
+
+iterator allNodes*(tree: PackedTree): NodePos =
+  var p = 0
+  while p < tree.len:
+    yield NodePos(p)
+    let s = span(tree, p)
+    inc p, s
+
+proc toPackedItemId*(item: int32): PackedItemId {.inline.} =
+  PackedItemId(module: LitId(0), item: item)

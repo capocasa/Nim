@@ -66,10 +66,17 @@ proc semOperand(c: PContext, n: PNode, flags: TExprFlags = {}): PNode =
 proc semExprCheck(c: PContext, n: PNode, flags: TExprFlags): PNode =
   rejectEmptyNode(n)
   result = semExpr(c, n, flags+{efWantValue})
-  if result.kind == nkEmpty:
+
+  let
+    isEmpty = result.kind == nkEmpty
+    isTypeError = result.typ != nil and result.typ.kind == tyError
+
+  if isEmpty or isTypeError:
     # bug #12741, redundant error messages are the lesser evil here:
     localError(c.config, n.info, errExprXHasNoType %
                 renderTree(result, {renderNoComments}))
+
+  if isEmpty:
     # do not produce another redundant error message:
     result = errorNode(c, n)
 
@@ -78,6 +85,9 @@ proc semExprWithType(c: PContext, n: PNode, flags: TExprFlags = {}): PNode =
   if result.typ == nil or result.typ == c.enforceVoidContext:
     localError(c.config, n.info, errExprXHasNoType %
                 renderTree(result, {renderNoComments}))
+    result.typ = errorType(c)
+  elif result.typ.kind == tyError:
+    # associates the type error to the current owner
     result.typ = errorType(c)
   else:
     if result.typ.kind in {tyVar, tyLent}: result = newDeref(result)
@@ -842,7 +852,7 @@ proc semOverloadedCallAnalyseEffects(c: PContext, n: PNode, nOrig: PNode,
     # consider: 'for x in pReturningArray()' --> we don't want the restriction
     # to 'skIterator' anymore; skIterator is preferred in sigmatch already
     # for typeof support.
-    # for ``type(countup(1,3))``, see ``tests/ttoseq``.
+    # for ``typeof(countup(1,3))``, see ``tests/ttoseq``.
     result = semOverloadedCall(c, n, nOrig,
       {skProc, skFunc, skMethod, skConverter, skMacro, skTemplate, skIterator}, flags)
   else:
@@ -887,6 +897,9 @@ proc setGenericParams(c: PContext, n: PNode) =
     n[i].typ = semTypeNode(c, n[i], nil)
 
 proc afterCallActions(c: PContext; n, orig: PNode, flags: TExprFlags): PNode =
+  if efNoSemCheck notin flags and n.typ != nil and n.typ.kind == tyError:
+    return errorNode(c, n)
+
   result = n
   let callee = result[0].sym
   case callee.kind
@@ -1368,6 +1381,9 @@ proc builtinFieldAccess(c: PContext, n: PNode, flags: TExprFlags): PNode =
       return tryReadingTypeField(c, n, i, ty.base)
   elif isTypeExpr(n.sons[0]):
     return tryReadingTypeField(c, n, i, ty)
+  elif ty.kind == tyError:
+    # a type error doesn't have any builtin fields
+    return nil
 
   if ty.kind in tyUserTypeClasses and ty.isResolvedUserTypeClass:
     ty = ty.lastSon
@@ -2006,17 +2022,27 @@ proc processQuotations(c: PContext; n: var PNode, op: string,
     ids.add n
     return
 
+  template handlePrefixOp(prefixed) =
+    if prefixed[0].kind == nkIdent:
+      let examinedOp = prefixed[0].ident.s
+      if examinedOp == op:
+        returnQuote prefixed[1]
+      elif examinedOp.startsWith(op):
+        prefixed[0] = newIdentNode(getIdent(c.cache, examinedOp.substr(op.len)), prefixed.info)
 
   if n.kind == nkPrefix:
     checkSonsLen(n, 2, c.config)
-    if n[0].kind == nkIdent:
-      var examinedOp = n[0].ident.s
-      if examinedOp == op:
-        returnQuote n[1]
-      elif examinedOp.startsWith(op):
-        n[0] = newIdentNode(getIdent(c.cache, examinedOp.substr(op.len)), n.info)
-  elif n.kind == nkAccQuoted and op == "``":
-    returnQuote n[0]
+    handlePrefixOp(n)
+  elif n.kind == nkAccQuoted:
+    if op == "``":
+      returnQuote n[0]
+    else: # [bug #7589](https://github.com/nim-lang/Nim/issues/7589)
+      if n.len == 2 and n[0].ident.s == op:
+        var tempNode = nkPrefix.newTree()
+        tempNode.newSons(2)
+        tempNode[0] = n[0]
+        tempNode[1] = n[1]
+        handlePrefixOp(tempNode)
   elif n.kind == nkIdent:
     if n.ident.s == "result":
       n = ids[0]
@@ -2348,6 +2374,7 @@ proc semWhen(c: PContext, n: PNode, semCheck = true): PNode =
           discard
         elif e.intVal != 0 and result == nil:
           setResult(it[1])
+          return # we're not in nimvm and we already have a result
     of nkElse, nkElseExpr:
       checkSonsLen(it, 1, c.config)
       if result == nil or whenNimvm:
@@ -2532,9 +2559,9 @@ proc semExportExcept(c: PContext, n: PNode): PNode =
 
 proc semExport(c: PContext, n: PNode): PNode =
   proc specialSyms(c: PContext; s: PSym) {.inline.} =
-    if s.kind == skConverter: addConverter(c, s)
+    if s.kind == skConverter: addConverter(c, LazySym(sym: s))
     elif s.kind == skType and s.typ != nil and s.typ.kind == tyEnum and sfPure in s.flags:
-      addPureEnum(c, s)
+      addPureEnum(c, LazySym(sym: s))
 
   result = newNodeI(nkExportStmt, n.info)
   for i in 0..<n.len:
@@ -2927,6 +2954,13 @@ proc semExpr(c: PContext, n: PNode, flags: TExprFlags = {}): PNode =
     for i in 0..<n.len:
       n[i] = semExpr(c, n[i])
   of nkComesFrom: discard "ignore the comes from information for now"
+  of nkMixinStmt: discard
+  of nkBindStmt:
+    if c.p != nil:
+      c.p.localBindStmts.add n
+    else:
+      localError(c.config, n.info, "invalid context for 'bind' statement: " &
+                renderTree(n, {renderNoComments}))
   else:
     localError(c.config, n.info, "invalid expression: " &
                renderTree(n, {renderNoComments}))

@@ -8,6 +8,9 @@ import ../../lib/packages/docutils/rstgen
 import ../../lib/packages/docutils/rst
 import unittest, strutils, strtabs
 
+proc toHtml(input: string): string =
+  rstToHtml(input, {roSupportMarkdown}, defaultConfig())
+
 suite "YAML syntax highlighting":
   test "Basics":
     let input = """.. code-block:: yaml
@@ -258,8 +261,8 @@ Wrong chapter
 ------------
 
 """
-    let output4 = rstToHtml(input4, {roSupportMarkdown}, defaultConfig())
-    doAssert "Wrong chapter" in output4 and "<h1" notin output4
+    expect(EParseError):
+      let output4 = rstToHtml(input4, {roSupportMarkdown}, defaultConfig())
 
     let input5 = """
 Check that punctuation after adornment and indent are not detected as adornment.
@@ -271,6 +274,190 @@ Some chapter
     let output5 = rstToHtml(input5, {roSupportMarkdown}, defaultConfig())
     doAssert "&quot;punctuation symbols&quot;" in output5 and "<h1" in output5
 
+    # check that EOF after adornment does not prevent it parsing as heading
+    let input6 = dedent """
+      Some chapter
+      ------------"""
+    let output6 = rstToHtml(input6, {roSupportMarkdown}, defaultConfig())
+    doAssert "<h1 id=\"some-chapter\">Some chapter</h1>" in output6
+
+    # check that overline and underline match
+    let input7 = dedent """
+      ------------
+      Some chapter
+      -----------
+      """
+    expect(EParseError):
+      let output7 = rstToHtml(input7, {roSupportMarkdown}, defaultConfig())
+
+    let input8 = dedent """
+      -----------
+          Overflow
+      -----------
+      """
+    expect(EParseError):
+      let output8 = rstToHtml(input8, {roSupportMarkdown}, defaultConfig())
+
+    # check that hierarchy of title styles works
+    let input9good = dedent """
+      Level1
+      ======
+
+      Level2
+      ------
+
+      Level3
+      ~~~~~~
+
+      L1
+      ==
+
+      Another2
+      --------
+
+      More3
+      ~~~~~
+
+      """
+    let output9good = rstToHtml(input9good, {roSupportMarkdown}, defaultConfig())
+    doAssert "<h1 id=\"level1\">Level1</h1>" in output9good
+    doAssert "<h2 id=\"level2\">Level2</h2>" in output9good
+    doAssert "<h3 id=\"level3\">Level3</h3>" in output9good
+    doAssert "<h1 id=\"l1\">L1</h1>" in output9good
+    doAssert "<h2 id=\"another2\">Another2</h2>" in output9good
+    doAssert "<h3 id=\"more3\">More3</h3>" in output9good
+
+    # check that swap causes an exception
+    let input9Bad = dedent """
+      Level1
+      ======
+
+      Level2
+      ------
+      
+      Level3
+      ~~~~~~
+
+      L1
+      ==
+
+      More
+      ~~~~
+      
+      Another
+      -------
+
+      """
+    expect(EParseError):
+      let output9Bad = rstToHtml(input9Bad, {roSupportMarkdown}, defaultConfig())
+
+    # the same as input9good but with overline headings
+    # first overline heading has a special meaning: document title
+    let input10 = dedent """
+      ======
+      Title0
+      ======
+
+      +++++++++
+      SubTitle0
+      +++++++++
+
+      ------
+      Level1
+      ------
+
+      Level2
+      ------
+
+      ~~~~~~
+      Level3
+      ~~~~~~
+
+      --
+      L1
+      --
+
+      Another2
+      --------
+
+      ~~~~~
+      More3
+      ~~~~~
+
+      """
+    var option: bool
+    var rstGenera: RstGenerator
+    var output10: string
+    rstGenera.initRstGenerator(outHtml, defaultConfig(), "input", {})
+    rstGenera.renderRstToOut(rstParse(input10, "", 1, 1, option, {}), output10)
+    doAssert rstGenera.meta[metaTitle] == "Title0"
+    doAssert rstGenera.meta[metaSubTitle] == "SubTitle0"
+    doAssert "<h1 id=\"level1\"><center>Level1</center></h1>" in output10
+    doAssert "<h2 id=\"level2\">Level2</h2>" in output10
+    doAssert "<h3 id=\"level3\"><center>Level3</center></h3>" in output10
+    doAssert "<h1 id=\"l1\"><center>L1</center></h1>" in output10
+    doAssert "<h2 id=\"another2\">Another2</h2>" in output10
+    doAssert "<h3 id=\"more3\"><center>More3</center></h3>" in output10
+
+    # check that a paragraph prevents interpreting overlines as document titles
+    let input11 = dedent """
+      Paragraph
+
+      ======
+      Title0
+      ======
+
+      +++++++++
+      SubTitle0
+      +++++++++
+      """
+    var option11: bool
+    var rstGenera11: RstGenerator
+    var output11: string
+    rstGenera11.initRstGenerator(outHtml, defaultConfig(), "input", {})
+    rstGenera11.renderRstToOut(rstParse(input11, "", 1, 1, option11, {}), output11)
+    doAssert rstGenera11.meta[metaTitle] == ""
+    doAssert rstGenera11.meta[metaSubTitle] == ""
+    doAssert "<h1 id=\"title0\"><center>Title0</center></h1>" in output11
+    doAssert "<h2 id=\"subtitle0\"><center>SubTitle0</center></h2>" in output11
+
+    # check that RST and Markdown headings don't interfere
+    let input12 = dedent """
+      ======
+      Title0
+      ======
+
+      MySection1a
+      +++++++++++
+
+      # MySection1b
+
+      MySection1c
+      +++++++++++
+
+      ##### MySection5a
+
+      MySection2a
+      -----------
+      """
+    var option12: bool
+    var rstGenera12: RstGenerator
+    var output12: string
+    rstGenera12.initRstGenerator(outHtml, defaultConfig(), "input", {})
+    rstGenera12.renderRstToOut(rstParse(input12, "", 1, 1, option12, {roSupportMarkdown}), output12)
+    doAssert rstGenera12.meta[metaTitle] == "Title0"
+    doAssert rstGenera12.meta[metaSubTitle] == ""
+    doAssert output12 ==
+             "\n<h1 id=\"mysection1a\">MySection1a</h1>" & # RST
+             "\n<h1 id=\"mysection1b\">MySection1b</h1>" & # Markdown
+             "\n<h1 id=\"mysection1c\">MySection1c</h1>" & # RST
+             "\n<h5 id=\"mysection5a\">MySection5a</h5>" & # Markdown
+             "\n<h2 id=\"mysection2a\">MySection2a</h2>"   # RST
+
+  test "RST inline text":
+    let input1 = "GC_step"
+    let output1 = input1.toHtml
+    doAssert output1 == "GC_step"
 
   test "RST links":
     let input1 = """
@@ -298,8 +485,8 @@ This is too short to be a transition:
 
 context2
 """
-    let output2 = rstToHtml(input2, {roSupportMarkdown}, defaultConfig())
-    doAssert "<hr" notin output2
+    expect(EParseError):
+      let output2 = rstToHtml(input2, {roSupportMarkdown}, defaultConfig())
 
   test "RST literal block":
     let input1 = """
@@ -521,6 +708,15 @@ Test1
     doAssert count(output7, "<li>") == 3
     doAssert "start=\"3\"" in output7 and "class=\"upperalpha simple\"" in output7
 
+    # check that it's not recognized as enum.list without indentation on 2nd line
+    let input8 = dedent """
+      A. string1
+      string2
+      """
+    # TODO: find out hot to catch warning here instead of throwing a defect
+    expect(AssertionDefect):
+      let output8 = input8.toHtml
+
   test "Markdown enumerated lists":
     let input1 = dedent """
       Below are 2 enumerated lists: Markdown-style (5 items) and RST (1 item)
@@ -564,6 +760,203 @@ Test1
       doAssert ("<li>line" & $i & " " & $i & "</li>") in output1
     doAssert count(output1, "<ul ") == 1
     doAssert count(output1, "</ul>") == 1
+
+  test "Nim RST footnotes and citations":
+    # check that auto-label footnote enumerated properly after a manual one
+    let input1 = dedent """
+      .. [1] Body1.
+      .. [#note] Body2
+
+      Ref. [#note]_
+      """
+    let output1 = input1.toHtml
+    doAssert output1.count(">[1]</a>") == 1
+    doAssert output1.count(">[2]</a>") == 2
+    doAssert "href=\"#footnote-note\"" in output1
+    doAssert ">[-1]" notin output1
+    doAssert "Body1." in output1
+    doAssert "Body2" in output1
+
+    # check that there are NO footnotes/citations, only comments:
+    let input2 = dedent """
+      .. [1 #] Body1.
+      .. [# note] Body2.
+      .. [wrong citation] That gives you a comment.
+
+      .. [not&allowed] That gives you a comment.
+
+      Not references[#note]_[1 #]_ [wrong citation]_ and [not&allowed]_.
+      """
+    let output2 = input2.toHtml
+    doAssert output2 == "Not references[#note]_[1 #]_ [wrong citation]_ and [not&amp;allowed]_. "
+
+    # check that auto-symbol footnotes work:
+    let input3 = dedent """
+      Ref. [*]_ and [*]_ and [*]_.
+
+      .. [*] Body1
+      .. [*] Body2.
+
+
+      .. [*] Body3.
+      .. [*] Body4
+
+      And [*]_.
+      """
+    let output3 = input3.toHtml
+    # both references and footnotes. Footnotes have link to themselves.
+    doAssert output3.count("href=\"#footnotesym-1\">[*]</a>") == 2
+    doAssert output3.count("href=\"#footnotesym-2\">[**]</a>") == 2
+    doAssert output3.count("href=\"#footnotesym-3\">[***]</a>") == 2
+    doAssert output3.count("href=\"#footnotesym-4\">[^]</a>") == 2
+    # footnote group
+    doAssert output3.count("<hr class=\"footnote\">" &
+                           "<div class=\"footnote-group\">") == 1
+    # footnotes
+    doAssert output3.count("<div class=\"footnote-label\"><sup><strong>" &
+               "<a href=\"#footnotesym-1\">[*]</a></strong></sup></div>") == 1
+    doAssert output3.count("<div class=\"footnote-label\"><sup><strong>" &
+               "<a href=\"#footnotesym-2\">[**]</a></strong></sup></div>") == 1
+    doAssert output3.count("<div class=\"footnote-label\"><sup><strong>" &
+               "<a href=\"#footnotesym-3\">[***]</a></strong></sup></div>") == 1
+    doAssert output3.count("<div class=\"footnote-label\"><sup><strong>" &
+               "<a href=\"#footnotesym-4\">[^]</a></strong></sup></div>") == 1
+    for i in 1 .. 4: doAssert ("Body" & $i) in output3
+
+    # check manual, auto-number and auto-label footnote enumeration
+    let input4 = dedent """
+      .. [3] Manual1.
+      .. [#] Auto-number1.
+      .. [#mylabel] Auto-label1.
+      .. [#note] Auto-label2.
+      .. [#] Auto-number2.
+
+      Ref. [#note]_ and [#]_ and [#]_.
+      """
+    let output4 = input4.toHtml
+    doAssert ">[-1]" notin output1
+    let order = @[
+        "footnote-3", "[3]", "Manual1.",
+        "footnoteauto-1", "[1]", "Auto-number1",
+        "footnote-mylabel", "[2]", "Auto-label1",
+        "footnote-note", "[4]", "Auto-label2",
+        "footnoteauto-2", "[5]", "Auto-number2",
+        ]
+    for i in 0 .. order.len-2:
+      let pos1 = output4.find(order[i])
+      let pos2 = output4.find(order[i+1])
+      doAssert pos1 >= 0
+      doAssert pos2 >= 0
+      doAssert pos1 < pos2
+
+    # forgot [#]_
+    let input5 = dedent """
+      .. [3] Manual1.
+      .. [#] Auto-number1.
+      .. [#note] Auto-label2.
+
+      Ref. [#note]_
+      """
+    # TODO: find out hot to configure proper exception instead of defect
+    expect(AssertionDefect):
+      let output5 = input5.toHtml
+
+    # extra [*]_
+    let input6 = dedent """
+      Ref. [*]_
+
+      .. [*] Auto-Symbol.
+
+      Ref. [*]_
+      """
+    expect(AssertionDefect):
+      let output6 = input6.toHtml
+
+    let input7 = dedent """
+      .. [Some:CITATION-2020] Citation.
+
+      Ref. [some:citation-2020]_.
+      """
+    let output7 = input7.toHtml
+    doAssert output7.count("href=\"#citation-somecoloncitationminus2020\"") == 2
+    doAssert output7.count("[Some:CITATION-2020]") == 1
+    doAssert output7.count("[some:citation-2020]") == 1
+    doAssert output3.count("<hr class=\"footnote\">" &
+                           "<div class=\"footnote-group\">") == 1
+
+    let input8 = dedent """
+      .. [Some] Citation.
+
+      Ref. [som]_.
+      """
+    expect(AssertionDefect):
+      let output8 = input8.toHtml
+
+    # check that footnote group does not break parsing of other directives:
+    let input9 = dedent """
+      .. [Some] Citation.
+
+      .. _`internal anchor`:
+
+      .. [Another] Citation.
+      .. just comment.
+      .. [Third] Citation.
+
+      Paragraph1.
+
+      Paragraph2 ref `internal anchor`_.
+      """
+    let output9 = input9.toHtml
+    #doAssert "id=\"internal-anchor\"" in output9
+    #doAssert "internal anchor" notin output9
+    doAssert output9.count("<hr class=\"footnote\">" &
+                           "<div class=\"footnote-group\">") == 1
+    doAssert output9.count("<div class=\"footnote-label\">") == 3
+    doAssert "just comment" notin output9
+
+    # check that nested citations/footnotes work
+    let input10 = dedent """
+      Paragraph1 [#]_.
+
+      .. [First] Citation.
+
+         .. [#] Footnote.
+
+            .. [Third] Citation.
+      """
+    let output10 = input10.toHtml
+    doAssert output10.count("<hr class=\"footnote\">" &
+                            "<div class=\"footnote-group\">") == 3
+    doAssert output10.count("<div class=\"footnote-label\">") == 3
+    doAssert "<a href=\"#citation-first\">[First]</a>" in output10
+    doAssert "<a href=\"#footnoteauto-1\">[1]</a>" in output10
+    doAssert "<a href=\"#citation-third\">[Third]</a>" in output10
+
+    let input11 = ".. [note]\n"  # should not crash
+    let output11 = input11.toHtml
+    doAssert "<a href=\"#citation-note\">[note]</a>" in output11
+
+    # check that references to auto-numbered footnotes work
+    let input12 = dedent """
+      Ref. [#]_ and [#]_ STOP.
+
+      .. [#] Body1.
+      .. [#] Body3
+      .. [2] Body2.
+      """
+    let output12 = input12.toHtml
+    let orderAuto = @[
+        "#footnoteauto-1", "[1]",
+        "#footnoteauto-2", "[3]",
+        "STOP.",
+        "Body1.", "Body3", "Body2."
+        ]
+    for i in 0 .. orderAuto.len-2:
+      let pos1 = output12.find(orderAuto[i])
+      let pos2 = output12.find(orderAuto[i+1])
+      doAssert pos1 >= 0
+      doAssert pos2 >= 0
+      doAssert pos1 < pos2
 
   test "Nim (RST extension) code-block":
     # check that presence of fields doesn't consume the following text as
@@ -753,6 +1146,13 @@ Test1
       -----------
 
       Ref. target300_ and target301_.
+
+      .. _target103:
+
+      .. [cit2020] note.
+
+      Ref. target103_.
+
     """
     let output2 = rstToHtml(input2, {roSupportMarkdown}, defaultConfig())
     # "target101" should be erased and changed to "section-xyz":
@@ -765,6 +1165,7 @@ Test1
     # links should preserve their original names but point to section labels:
     doAssert "href=\"#section-xyz\">target300" in output2
     doAssert "href=\"#subsectiona\">target301" in output2
+    doAssert "href=\"#citation-cit2020\">target103" in output2
 
     let output2l = rstToLatex(input2, {})
     doAssert "\\label{section-xyz}\\hypertarget{section-xyz}{}" in output2l

@@ -190,15 +190,10 @@ proc evalTypeTrait(c: PContext; traitCall: PNode, operand: PType, context: PSym)
     result = newIntNodeT(toInt128(operand.len), traitCall, c.idgen, c.graph)
   of "distinctBase":
     var arg = operand.skipTypes({tyGenericInst})
-    if arg.kind == tyDistinct:
-      while arg.kind == tyDistinct:
-        arg = arg.base
-        arg = arg.skipTypes(skippedTypes + {tyGenericInst})
-      result = getTypeDescNode(c, arg, operand.owner, traitCall.info)
-    else:
-      localError(c.config, traitCall.info,
-        "distinctBase expects a distinct type as argument. The given type was " & typeToString(operand))
-      result = newType(tyError, nextTypeId c.idgen, context).toNode(traitCall.info)
+    while arg.kind == tyDistinct:
+      arg = arg.base
+      arg = arg.skipTypes(skippedTypes + {tyGenericInst})
+    result = getTypeDescNode(c, arg, operand.owner, traitCall.info)
   else:
     localError(c.config, traitCall.info, "unknown trait: " & s)
     result = newNodeI(nkEmpty, traitCall.info)
@@ -382,6 +377,8 @@ proc semUnown(c: PContext; n: PNode): PNode =
       let b = unownedType(c, t[^1])
       if b != t[^1]:
         result = copyType(t, nextTypeId c.idgen, t.owner)
+        copyTypeProps(c.graph, c.idgen.module, result, t)
+
         result[^1] = b
         result.flags.excl tfHasOwned
       else:
@@ -541,7 +538,8 @@ proc magicsAfterOverloadResolution(c: PContext, n: PNode,
 
         # check if we converted this finalizer into a destructor already:
         let t = whereToBindTypeHook(c, fin.typ[1].skipTypes(abstractInst+{tyRef}))
-        if t != nil and t.attachedOps[attachedDestructor] != nil and t.attachedOps[attachedDestructor].owner == fin:
+        if t != nil and getAttachedOp(c.graph, t, attachedDestructor) != nil and
+            getAttachedOp(c.graph, t, attachedDestructor).owner == fin:
           discard "already turned this one into a finalizer"
         else:
           bindTypeHook(c, turnFinalizerIntoDestructor(c, fin, n.info), n, attachedDestructor)
@@ -549,8 +547,9 @@ proc magicsAfterOverloadResolution(c: PContext, n: PNode,
   of mDestroy:
     result = n
     let t = n[1].typ.skipTypes(abstractVar)
-    if t.destructor != nil:
-      result[0] = newSymNode(t.destructor)
+    let op = getAttachedOp(c.graph, t, attachedDestructor)
+    if op != nil:
+      result[0] = newSymNode(op)
   of mUnown:
     result = semUnown(c, n)
   of mExists, mForall:

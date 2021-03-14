@@ -92,7 +92,16 @@ copy
 destroy
 destroy
 destroy
+sink
+destroy
+copy
+(f: 1)
+destroy
+destroy
 part-to-whole assigment:
+sink
+(children: @[])
+destroy
 sink
 (children: @[])
 destroy
@@ -675,6 +684,16 @@ proc caseNotAConstant =
 
 caseNotAConstant()
 
+proc potentialSelfAssign(i: var int) =
+  var a: array[2, OO]
+  a[i] = OO(f: 1) # turned into a memcopy
+  a[1] = OO(f: 2)
+  a[i+1] = a[i] # This must not =sink, but =copy
+  inc i
+  echo a[i-1] # (f: 1)
+
+potentialSelfAssign (var xi = 0; xi)
+
 
 #--------------------------------------------------------------------
 echo "part-to-whole assigment:"
@@ -700,6 +719,17 @@ proc partToWholeSeq =
 
 partToWholeSeq()
 
+proc partToWholeSeqRTIndex =
+  var i = 0
+  var t = Tree(children: @[Tree()])
+  t = t.children[i] # See comment in partToWholeSeq
+
+  var tc = TreeDefaultHooks(children: @[TreeDefaultHooks()])
+  tc = tc.children[i] # See comment in partToWholeSeq
+  echo tc
+
+partToWholeSeqRTIndex()
+
 type List = object
   next: ref List
 
@@ -712,4 +742,31 @@ proc partToWholeUnownedRef =
   t = t.next[] # Copy because t.next is not an owned ref, and thus t.next[] cannot be moved
 
 partToWholeUnownedRef()
+
+
+#--------------------------------------------------------------------
+# test that nodes that get copied during the transformation
+# (like dot exprs) don't loose their firstWrite/lastRead property
+
+type
+  OOO = object
+    initialized: bool
+
+  C = object
+    o: OOO
+
+proc `=destroy`(o: var OOO) =
+  doAssert o.initialized, "OOO was destroyed before initialization!"
+
+proc initO(): OOO =
+  OOO(initialized: true)
+
+proc initC(): C =
+  C(o: initO())
+
+proc pair(): tuple[a: C, b: C] =
+  result.a = initC() # <- when firstWrite tries to find this node to start its analysis it fails, because injectdestructors uses copyTree/shallowCopy
+  result.b = initC()
+
+discard pair()
 

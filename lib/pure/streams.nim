@@ -29,7 +29,7 @@
 ##
 ## .. code-block:: Nim
 ##
-##  import streams
+##  import std/streams
 ##
 ##  var strm = newStringStream("""The first line
 ##  the second line
@@ -54,7 +54,7 @@
 ##
 ## .. code-block:: Nim
 ##
-##  import streams
+##  import std/streams
 ##
 ##  var strm = newFileStream("somefile.txt", fmWrite)
 ##  var line = ""
@@ -74,7 +74,7 @@
 ##
 ## .. code-block:: Nim
 ##
-##  import streams
+##  import std/streams
 ##
 ##  var strm = newFileStream("somefile.txt", fmRead)
 ##  var line = ""
@@ -144,7 +144,7 @@ proc flush*(s: Stream) =
   ## See also:
   ## * `close proc <#close,Stream>`_
   runnableExamples:
-    from os import removeFile
+    from std/os import removeFile
 
     var strm = newFileStream("somefile.txt", fmWrite)
 
@@ -924,7 +924,7 @@ proc readStrPrivate(s: Stream, length: int, str: var string) =
   when defined(js):
     let L = readData(s, addr(str), length)
   else:
-    let L = readData(s, cstring(str.string), length)
+    let L = readData(s, cstring(str), length)
   if L != len(str): setLen(str, L)
 
 proc readStr*(s: Stream, length: int, str: var string) {.since: (1, 3).} =
@@ -950,7 +950,7 @@ proc peekStrPrivate(s: Stream, length: int, str: var string) =
   when defined(js):
     let L = peekData(s, addr(str), length)
   else:
-    let L = peekData(s, cstring(str.string), length)
+    let L = peekData(s, cstring(str), length)
   if L != len(str): setLen(str, L)
 
 proc peekStr*(s: Stream, length: int, str: var string) {.since: (1, 3).} =
@@ -1150,10 +1150,7 @@ when (NimMajor, NimMinor) < (1, 3) and defined(js):
 
   proc ssClose(s: Stream) {.compileTime.} =
     var s = StringStream(s)
-    when defined(nimNoNilSeqs):
-      s.data = ""
-    else:
-      s.data = nil
+    s.data = ""
 
   proc newStringStream*(s: string = ""): owned StringStream {.compileTime.} =
     new(result)
@@ -1253,10 +1250,7 @@ else: # after 1.3 or JS not defined
 
   proc ssClose(s: Stream) =
     var s = StringStream(s)
-    when defined(nimNoNilSeqs):
-      s.data = ""
-    else:
-      s.data = nil
+    s.data = ""
 
   proc newStringStream*(s: string = ""): owned StringStream =
     ## Creates a new stream from the string `s`.
@@ -1393,7 +1387,7 @@ proc newFileStream*(filename: string, mode: FileMode = fmRead,
   ## * `openFileStream proc <#openFileStream,string,FileMode,int>`_ creates a
   ##   file stream from the file name and the mode.
   runnableExamples:
-    from os import removeFile
+    from std/os import removeFile
     var strm = newFileStream("somefile.txt", fmWrite)
     if not isNil(strm):
       strm.writeLine("The first line")
