@@ -163,7 +163,12 @@ proc raiseEIO(msg: string) {.noinline, noreturn.} =
 proc raiseEOF() {.noinline, noreturn.} =
   raise newException(EOFError, "EOF reached")
 
-proc strerror(errnum: cint): cstring {.importc, header: "<string.h>".}
+proc c_gnu_strerror_r(errnum: cint, buf: cstring, buflen: csize_t): cstring {.
+  importc: "strerror_r", header: "<string.h>".}
+
+proc strerror(errnum: cint): string =
+  var buf: array[256, char]
+  result = $c_gnu_strerror_r(errnum, cast[cstring](addr buf[0]), csize_t(buf.len))
 
 when not defined(nimscript):
   var

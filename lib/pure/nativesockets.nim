@@ -215,13 +215,20 @@ proc getProtoByName*(name: string): int {.since: (1, 3, 5).} =
   ## Returns a protocol code from the database that matches the protocol `name`.
   when useWinVersion:
     let protoent = winlean.getprotobyname(name.cstring)
+    if protoent == nil:
+      raise newException(OSError, "protocol not found: " & name)
+    result = protoent.p_proto.int
   else:
-    let protoent = posix.getprotobyname(name.cstring)
-
-  if protoent == nil:
-    raise newException(OSError, "protocol not found: " & name)
-
-  result = protoent.p_proto.int
+    proc getprotobyname_r(name: cstring, resultBuf: ptr posix.Protoent,
+        buf: cstring, buflen: csize_t, res: ptr ptr posix.Protoent): cint {.
+        importc, header: "<netdb.h>".}
+    var pe: posix.Protoent
+    var buf: array[1024, char]
+    var res: ptr posix.Protoent
+    if getprotobyname_r(name.cstring, addr pe,
+        cast[cstring](addr buf[0]), csize_t(buf.len), addr res) != 0 or res.isNil:
+      raise newException(OSError, "protocol not found: " & name)
+    result = pe.p_proto.int
 
 proc close*(socket: SocketHandle) =
   ## Closes a socket.
@@ -371,15 +378,29 @@ when not useNimNetLite:
     ## On posix this will search through the `/etc/services` file.
     when useWinVersion:
       var s = winlean.getservbyname(name, proto)
+      if s == nil: raiseOSError(osLastError(), "Service not found.")
+      result = Servent(
+        name: $s.s_name,
+        aliases: cstringArrayToSeq(s.s_aliases),
+        port: Port(s.s_port),
+        proto: $s.s_proto
+      )
     else:
-      var s = posix.getservbyname(name, proto)
-    if s == nil: raiseOSError(osLastError(), "Service not found.")
-    result = Servent(
-      name: $s.s_name,
-      aliases: cstringArrayToSeq(s.s_aliases),
-      port: Port(s.s_port),
-      proto: $s.s_proto
-    )
+      proc getservbyname_r(name, proto: cstring, resultBuf: ptr posix.Servent,
+          buf: cstring, buflen: csize_t, res: ptr ptr posix.Servent): cint {.
+          importc, header: "<netdb.h>".}
+      var se: posix.Servent
+      var buf: array[1024, char]
+      var res: ptr posix.Servent
+      if getservbyname_r(name.cstring, proto.cstring, addr se,
+          cast[cstring](addr buf[0]), csize_t(buf.len), addr res) != 0 or res.isNil:
+        raiseOSError(osLastError(), "Service not found.")
+      result = Servent(
+        name: $se.s_name,
+        aliases: cstringArrayToSeq(se.s_aliases),
+        port: Port(se.s_port),
+        proto: $se.s_proto
+      )
 
   proc getServByPort*(port: Port, proto: string): Servent {.tags: [ReadIOEffect].} =
     ## Searches the database from the beginning and finds the first entry for
@@ -389,15 +410,29 @@ when not useNimNetLite:
     ## On posix this will search through the `/etc/services` file.
     when useWinVersion:
       var s = winlean.getservbyport(uint16(port).cint, proto)
+      if s == nil: raiseOSError(osLastError(), "Service not found.")
+      result = Servent(
+        name: $s.s_name,
+        aliases: cstringArrayToSeq(s.s_aliases),
+        port: Port(s.s_port),
+        proto: $s.s_proto
+      )
     else:
-      var s = posix.getservbyport(uint16(port).cint, proto)
-    if s == nil: raiseOSError(osLastError(), "Service not found.")
-    result = Servent(
-      name: $s.s_name,
-      aliases: cstringArrayToSeq(s.s_aliases),
-      port: Port(s.s_port),
-      proto: $s.s_proto
-    )
+      proc getservbyport_r(port: cint, proto: cstring, resultBuf: ptr posix.Servent,
+          buf: cstring, buflen: csize_t, res: ptr ptr posix.Servent): cint {.
+          importc, header: "<netdb.h>".}
+      var se: posix.Servent
+      var buf: array[1024, char]
+      var res: ptr posix.Servent
+      if getservbyport_r(uint16(port).cint, proto.cstring, addr se,
+          cast[cstring](addr buf[0]), csize_t(buf.len), addr res) != 0 or res.isNil:
+        raiseOSError(osLastError(), "Service not found.")
+      result = Servent(
+        name: $se.s_name,
+        aliases: cstringArrayToSeq(se.s_aliases),
+        port: Port(se.s_port),
+        proto: $se.s_proto
+      )
 
   proc getHostByAddr*(ip: string): Hostent {.tags: [ReadIOEffect].} =
     ## This function will lookup the hostname of an IP Address.
@@ -424,84 +459,102 @@ when not useNimNetLite:
       var s = winlean.gethostbyaddr(cast[ptr InAddr](myAddr), addrLen.cuint,
                                     cint(family))
       if s == nil: raiseOSError(osLastError())
-    else:
-      var s =
-        when defined(android4):
-          posix.gethostbyaddr(cast[cstring](myAddr), addrLen.cint,
-                              cint(family))
-        else:
-          posix.gethostbyaddr(myAddr, addrLen.SockLen,
-                              cint(family))
-      if s == nil:
-        raiseOSError(osLastError(), $hstrerror(h_errno))
-
-    result = Hostent(
-      name: $s.h_name,
-      aliases: cstringArrayToSeq(s.h_aliases)
-    )
-    when useWinVersion:
-      result.addrtype = Domain(s.h_addrtype)
-    else:
-      if s.h_addrtype == posix.AF_INET:
-        result.addrtype = AF_INET
-      elif s.h_addrtype == posix.AF_INET6:
-        result.addrtype = AF_INET6
+      result = Hostent(
+        name: $s.h_name,
+        aliases: cstringArrayToSeq(s.h_aliases),
+        addrtype: Domain(s.h_addrtype)
+      )
+      if result.addrtype == AF_INET:
+        result.addrList = @[]
+        var i = 0
+        while not isNil(s.h_addr_list[i]):
+          var inaddrPtr = cast[ptr InAddr](s.h_addr_list[i])
+          result.addrList.add($inet_ntoa(inaddrPtr[]))
+          inc(i)
       else:
-        raiseOSError(osLastError(), "unknown h_addrtype")
-    if result.addrtype == AF_INET:
-      result.addrList = @[]
-      var i = 0
-      while not isNil(s.h_addr_list[i]):
-        var inaddrPtr = cast[ptr InAddr](s.h_addr_list[i])
-        result.addrList.add($inet_ntoa(inaddrPtr[]))
-        inc(i)
+        let strAddrLen = 46
+        var i = 0
+        while not isNil(s.h_addr_list[i]):
+          var ipStr = newString(strAddrLen)
+          if inet_ntop(nativeAfInet6, cast[pointer](s.h_addr_list[i]),
+                       cstring(ipStr), len(ipStr).int32) == nil:
+            raiseOSError(osLastError())
+          setLen(ipStr, len(cstring(ipStr)))
+          result.addrList.add(ipStr)
+          inc(i)
+      result.length = int(s.h_length)
     else:
-      let strAddrLen = when not useWinVersion: posix.INET6_ADDRSTRLEN.int
-                       else: 46
-      var i = 0
-      while not isNil(s.h_addr_list[i]):
-        var ipStr = newString(strAddrLen)
-        if inet_ntop(nativeAfInet6, cast[pointer](s.h_addr_list[i]),
-                     cstring(ipStr), len(ipStr).int32) == nil:
-          raiseOSError(osLastError())
-        when not useWinVersion:
-          if posix.IN6_IS_ADDR_V4MAPPED(cast[ptr In6Addr](s.h_addr_list[i])) != 0:
-            ipStr.setSlice("::ffff:".len..<strAddrLen)
-        setLen(ipStr, len(cstring(ipStr)))
-        result.addrList.add(ipStr)
-        inc(i)
-    result.length = int(s.h_length)
+      # Use getnameinfo instead of gethostbyaddr for thread safety
+      var hostBuf: array[1024, char]
+      let ret = getnameinfo(addrInfo.ai_addr, addrInfo.ai_addrlen,
+                            cast[cstring](addr hostBuf[0]), 1024.SockLen,
+                            nil, 0.SockLen, 0.cint)
+      if ret != 0:
+        raiseOSError(osLastError(), $gai_strerror(ret))
+      result = Hostent(
+        name: $cast[cstring](addr hostBuf[0]),
+        aliases: @[],
+        addrList: @[ip],
+      )
+      if family == nativeAfInet:
+        result.addrtype = AF_INET
+        result.length = 4
+      else:
+        result.addrtype = AF_INET6
+        result.length = 16
 
   proc getHostByName*(name: string): Hostent {.tags: [ReadIOEffect].} =
     ## This function will lookup the IP address of a hostname.
     when useWinVersion:
       var s = winlean.gethostbyname(name)
-    else:
-      var s = posix.gethostbyname(name)
-    if s == nil: raiseOSError(osLastError())
-    result = Hostent(
-      name: $s.h_name,
-      aliases: cstringArrayToSeq(s.h_aliases)
-    )
-    when useWinVersion:
-      result.addrtype = Domain(s.h_addrtype)
-    else:
-      if s.h_addrtype == posix.AF_INET:
-        result.addrtype = AF_INET
-      elif s.h_addrtype == posix.AF_INET6:
-        result.addrtype = AF_INET6
+      if s == nil: raiseOSError(osLastError())
+      result = Hostent(
+        name: $s.h_name,
+        aliases: cstringArrayToSeq(s.h_aliases),
+        addrtype: Domain(s.h_addrtype)
+      )
+      if result.addrtype == AF_INET:
+        result.addrList = @[]
+        var i = 0
+        while not isNil(s.h_addr_list[i]):
+          var inaddrPtr = cast[ptr InAddr](s.h_addr_list[i])
+          result.addrList.add($inet_ntoa(inaddrPtr[]))
+          inc(i)
       else:
-        raiseOSError(osLastError(), "unknown h_addrtype")
-    if result.addrtype == AF_INET:
-      result.addrList = @[]
-      var i = 0
-      while not isNil(s.h_addr_list[i]):
-        var inaddrPtr = cast[ptr InAddr](s.h_addr_list[i])
-        result.addrList.add($inet_ntoa(inaddrPtr[]))
-        inc(i)
+        result.addrList = cstringArrayToSeq(s.h_addr_list)
+      result.length = int(s.h_length)
     else:
-      result.addrList = cstringArrayToSeq(s.h_addr_list)
-    result.length = int(s.h_length)
+      # Use getaddrinfo instead of gethostbyname for thread safety
+      var aiList: ptr AddrInfo
+      var hints: AddrInfo
+      hints.ai_family = posix.AF_UNSPEC
+      hints.ai_socktype = posix.SOCK_STREAM
+      let ret = getaddrinfo(name.cstring, nil, addr hints, aiList)
+      if ret != 0:
+        raiseOSError(osLastError(), $gai_strerror(ret))
+      defer: freeAddrInfo(aiList)
+      result = Hostent(name: name, aliases: @[], addrList: @[])
+      var ai = aiList
+      while ai != nil:
+        if ai.ai_family.cint == posix.AF_INET:
+          result.addrtype = AF_INET
+          let sa = cast[ptr Sockaddr_in](ai.ai_addr)
+          var ipStr = newString(posix.INET_ADDRSTRLEN.int)
+          if inet_ntop(posix.AF_INET, addr sa.sin_addr,
+                       cstring(ipStr), ipStr.len.int32) != nil:
+            ipStr.setLen(len(cstring(ipStr)))
+            result.addrList.add(ipStr)
+          result.length = 4
+        elif ai.ai_family.cint == posix.AF_INET6:
+          result.addrtype = AF_INET6
+          let sa = cast[ptr Sockaddr_in6](ai.ai_addr)
+          var ipStr = newString(posix.INET6_ADDRSTRLEN.int)
+          if inet_ntop(posix.AF_INET6, addr sa.sin6_addr,
+                       cstring(ipStr), ipStr.len.int32) != nil:
+            ipStr.setLen(len(cstring(ipStr)))
+            result.addrList.add(ipStr)
+          result.length = 16
+        ai = ai.ai_next
 
   proc getHostname*(): string {.tags: [ReadIOEffect].} =
     ## Returns the local hostname (not the FQDN)

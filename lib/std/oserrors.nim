@@ -21,8 +21,12 @@ when not defined(nimscript):
   else:
     var errno {.importc, header: "<errno.h>".}: cint
 
-    proc c_strerror(errnum: cint): cstring {.
-      importc: "strerror", header: "<string.h>".}
+    proc c_gnu_strerror_r(errnum: cint, buf: cstring, buflen: csize_t): cstring {.
+      importc: "strerror_r", header: "<string.h>".}
+
+    proc c_strerror(errnum: cint): string =
+      var buf: array[256, char]
+      result = $c_gnu_strerror_r(errnum, cast[cstring](addr buf[0]), csize_t(buf.len))
 
 proc `==`*(err1, err2: OSErrorCode): bool {.borrow.}
 proc `$`*(err: OSErrorCode): string {.borrow.}

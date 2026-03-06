@@ -28,6 +28,13 @@ when defined(windows):
 else:
   import std/posix
 
+  proc c_gnu_strerror_r(errnum: cint, buf: cstring, buflen: csize_t): cstring {.
+    importc: "strerror_r", header: "<string.h>".}
+
+  proc strerror_r_safe(errnum: cint): string =
+    var buf: array[256, char]
+    result = $c_gnu_strerror_r(errnum, cast[cstring](addr buf[0]), csize_t(buf.len))
+
 when defined(linux) and defined(useClone):
   import std/linux
 
@@ -1126,7 +1133,7 @@ elif not defined(useNimRtl):
       let sizeRead = read(data.pErrorPipe[readIdx], addr error, sizeof(error))
       if sizeRead == sizeof(error):
         raiseOSError(OSErrorCode(error),
-                      "Could not find command: '" & $data.sysCommand & "'. OS error: " & $strerror(error))
+                      "Could not find command: '" & $data.sysCommand & "'. OS error: " & $strerror_r_safe(error))
 
       return pid
 
