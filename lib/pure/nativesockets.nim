@@ -216,7 +216,14 @@ proc getProtoByName*(name: string): int {.since: (1, 3, 5).} =
   when useWinVersion:
     let protoent = winlean.getprotobyname(name.cstring)
   else:
-    let protoent = posix.getprotobyname(name.cstring)
+    proc getprotobyname_r(name: cstring, resultBuf: ptr posix.Protoent,
+        buf: cstring, buflen: csize_t, res: ptr ptr posix.Protoent): cint {.
+        importc, header: "<netdb.h>".}
+    var pe: posix.Protoent
+    var buf: array[1024, char]
+    var protoent: ptr posix.Protoent
+    discard getprotobyname_r(name.cstring, addr pe,
+        cast[cstring](addr buf[0]), csize_t(buf.len), addr protoent)
 
   if protoent == nil:
     raise newException(OSError, "protocol not found: " & name)
@@ -363,6 +370,23 @@ proc getSockDomain*(socket: SocketHandle): Domain =
     raise newException(IOError, "Unknown socket family in getSockDomain")
 
 when not useNimNetLite:
+  when not useWinVersion:
+    proc getservbyname_r(name, proto: cstring, resultBuf: ptr posix.Servent,
+        buf: cstring, buflen: csize_t, res: ptr ptr posix.Servent): cint {.
+        importc, header: "<netdb.h>".}
+    proc getservbyport_r(port: cint, proto: cstring, resultBuf: ptr posix.Servent,
+        buf: cstring, buflen: csize_t, res: ptr ptr posix.Servent): cint {.
+        importc, header: "<netdb.h>".}
+
+    proc gethostbyname_r(name: cstring, ret: ptr posix.Hostent,
+        buf: cstring, buflen: csize_t, res: ptr ptr posix.Hostent,
+        h_errnop: ptr cint): cint {.importc, header: "<netdb.h>".}
+    proc gethostbyaddr_r(
+        a1: pointer, a2: SockLen, a3: cint,
+        ret: ptr posix.Hostent, buf: cstring, buflen: csize_t,
+        res: ptr ptr posix.Hostent, h_errnop: ptr cint): cint {.
+        importc, header: "<netdb.h>".}
+
   proc getServByName*(name, proto: string): Servent {.tags: [ReadIOEffect].} =
     ## Searches the database from the beginning and finds the first entry for
     ## which the service name specified by `name` matches the s_name member
@@ -372,7 +396,11 @@ when not useNimNetLite:
     when useWinVersion:
       var s = winlean.getservbyname(name, proto)
     else:
-      var s = posix.getservbyname(name, proto)
+      var se: posix.Servent
+      var buf: array[1024, char]
+      var s: ptr posix.Servent
+      discard getservbyname_r(name.cstring, proto.cstring, addr se,
+          cast[cstring](addr buf[0]), csize_t(buf.len), addr s)
     if s == nil: raiseOSError(osLastError(), "Service not found.")
     result = Servent(
       name: $s.s_name,
@@ -390,7 +418,11 @@ when not useNimNetLite:
     when useWinVersion:
       var s = winlean.getservbyport(uint16(port).cint, proto)
     else:
-      var s = posix.getservbyport(uint16(port).cint, proto)
+      var se: posix.Servent
+      var buf: array[1024, char]
+      var s: ptr posix.Servent
+      discard getservbyport_r(uint16(port).cint, proto.cstring, addr se,
+          cast[cstring](addr buf[0]), csize_t(buf.len), addr s)
     if s == nil: raiseOSError(osLastError(), "Service not found.")
     result = Servent(
       name: $s.s_name,
@@ -425,15 +457,22 @@ when not useNimNetLite:
                                     cint(family))
       if s == nil: raiseOSError(osLastError())
     else:
-      var s =
-        when defined(android4):
-          posix.gethostbyaddr(cast[cstring](myAddr), addrLen.cint,
-                              cint(family))
-        else:
-          posix.gethostbyaddr(myAddr, addrLen.SockLen,
-                              cint(family))
+      var he: posix.Hostent
+      var buf: array[4096, char]
+      var h_errnop: cint
+      var s: ptr posix.Hostent
+      when defined(android4):
+        discard gethostbyaddr_r(cast[cstring](myAddr), addrLen.SockLen,
+                                cint(family), addr he,
+                                cast[cstring](addr buf[0]), csize_t(buf.len),
+                                addr s, addr h_errnop)
+      else:
+        discard gethostbyaddr_r(myAddr, addrLen.SockLen,
+                                cint(family), addr he,
+                                cast[cstring](addr buf[0]), csize_t(buf.len),
+                                addr s, addr h_errnop)
       if s == nil:
-        raiseOSError(osLastError(), $hstrerror(h_errno))
+        raiseOSError(osLastError(), $hstrerror(h_errnop))
 
     result = Hostent(
       name: $s.h_name,
@@ -477,7 +516,13 @@ when not useNimNetLite:
     when useWinVersion:
       var s = winlean.gethostbyname(name)
     else:
-      var s = posix.gethostbyname(name)
+      var he: posix.Hostent
+      var buf: array[4096, char]
+      var h_errnop: cint
+      var s: ptr posix.Hostent
+      discard gethostbyname_r(name.cstring, addr he,
+          cast[cstring](addr buf[0]), csize_t(buf.len),
+          addr s, addr h_errnop)
     if s == nil: raiseOSError(osLastError())
     result = Hostent(
       name: $s.h_name,
