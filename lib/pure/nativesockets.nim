@@ -16,6 +16,23 @@ import std/[os, options]
 import std/private/since
 import std/strbasics
 
+when defined(linux):
+  import std/private/libcdetect
+  {.emit: """
+#include <features.h>
+#ifdef __GLIBC__
+#define NIM_HAS_GETPROTOBYNAME_R 1
+#ifndef NIM_IS_GLIBC
+#define NIM_IS_GLIBC NIM_TRUE
+#endif
+#else
+#define NIM_HAS_GETPROTOBYNAME_R 0
+#ifndef NIM_IS_GLIBC
+#define NIM_IS_GLIBC NIM_FALSE
+#endif
+#endif
+""".}
+
 when defined(nimPreviewSlimSystem):
   import std/[assertions, syncio]
 
@@ -211,21 +228,43 @@ proc toSockType*(protocol: Protocol): SockType =
   of IPPROTO_IP, IPPROTO_IPV6, IPPROTO_RAW, IPPROTO_ICMP, IPPROTO_ICMPV6:
     SOCK_RAW
 
+when defined(linux):
+  # musl has no getprotobyname_r; protect the non-reentrant call with a lock
+  when compileOption("threads"):
+    import std/locks
+    var getprotobynameLock: Lock
+    getprotobynameLock.initLock
+
 proc getProtoByName*(name: string): int {.since: (1, 3, 5).} =
   ## Returns a protocol code from the database that matches the protocol `name`.
   when useWinVersion:
     let protoent = winlean.getprotobyname(name.cstring)
   elif defined(linux):
-    proc getprotobyname_r(name: cstring, resultBuf: ptr posix.Protoent,
-        buf: cstring, buflen: csize_t, res: ptr ptr posix.Protoent): cint {.
-        importc, header: "<netdb.h>".}
     var pe: posix.Protoent
     var buf: array[1024, char]
     var protoent: ptr posix.Protoent
-    discard getprotobyname_r(name.cstring, addr pe,
-        cast[cstring](addr buf[0]), csize_t(buf.len), addr protoent)
+    if isGlibc:
+      # glibc: use reentrant _r variant (guarded by #if so the symbol
+      # is not referenced on musl, where it doesn't exist)
+      var cname = name.cstring
+      {.emit: """
+      ;
+#if NIM_HAS_GETPROTOBYNAME_R
+      getprotobyname_r(`cname`, &`pe`, (char*)`buf`, sizeof(`buf`), &`protoent`);
+#endif
+      """.}
+    else:
+      # musl: no _r variant, no TLS — use a lock
+      when compileOption("threads"):
+        getprotobynameLock.withLock:
+          let p = posix.getprotobyname(name.cstring)
+          if p != nil:
+            pe = p[]
+            protoent = addr pe
+      else:
+        protoent = posix.getprotobyname(name.cstring)
   else:
-    # macOS: getprotobyname is thread-safe via TLS
+    # macOS/BSD: getprotobyname is thread-safe via TLS
     let protoent = posix.getprotobyname(name.cstring)
 
   if protoent == nil:
