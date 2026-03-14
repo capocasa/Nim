@@ -242,9 +242,8 @@ when defined(js):
 elif defined(posix):
   import std/posix
 
-  # localtime_r doesn't call tzset() implicitly unlike localtime(),
-  # so initialize timezone data once at module load.
-  tzset()
+  # localtime_r doesn't call tzset() implicitly unlike localtime().
+  # tzset() must be called before localtime_r to pick up TZ changes.
 
   type CTime = posix.Time
 
@@ -268,12 +267,8 @@ elif defined(windows):
       tm_yday*: cint  ## Day of year [0,365].
       tm_isdst*: cint ## Daylight Savings flag.
 
-  when defined(vcc):
-    # MSVC's localtime_s has reversed args vs C11
-    proc localtime_s(a2: ptr Tm, a1: var CTime): cint {.importc, header: "<time.h>", sideEffect.}
-  else:
-    # MinGW provides POSIX localtime_r
-    proc localtime_r(a1: var CTime, a2: ptr Tm): ptr Tm {.importc, header: "<time.h>", sideEffect.}
+  # Windows CRT's localtime_s has reversed args vs C11
+  proc localtime_s(a2: ptr Tm, a1: var CTime): cint {.importc, header: "<time.h>", sideEffect.}
 
 type
   Month* = enum ## Represents a month. Note that the enum starts at `1`,
@@ -1332,12 +1327,8 @@ else:
       if unix < 0:
         var a = 0.CTime
         var tm: Tm
-        when defined(vcc):
-          if localtime_s(addr tm, a) != 0:
-            return (0, false)
-        else:
-          if localtime_r(a, addr tm).isNil:
-            return (0, false)
+        if localtime_s(addr tm, a) != 0:
+          return (0, false)
         return ((0 - tm.toAdjUnix).int, false)
 
     # In case of a 32-bit time_t, we fallback to the closest available
@@ -1345,13 +1336,10 @@ else:
     var a = clamp(unix, low(CTime).int64, high(CTime).int64).CTime
     var tm: Tm
     when defined(windows):
-      when defined(vcc):
-        if localtime_s(addr tm, a) != 0:
-          return (0, false)
-      else:
-        if localtime_r(a, addr tm).isNil:
-          return (0, false)
+      if localtime_s(addr tm, a) != 0:
+        return (0, false)
     else:
+      tzset()
       if localtime_r(a, tm).isNil:
         return (0, false)
     return ((a.int64 - tm.toAdjUnix).int, tm.tm_isdst > 0)

@@ -215,7 +215,7 @@ proc getProtoByName*(name: string): int {.since: (1, 3, 5).} =
   ## Returns a protocol code from the database that matches the protocol `name`.
   when useWinVersion:
     let protoent = winlean.getprotobyname(name.cstring)
-  else:
+  elif defined(linux):
     proc getprotobyname_r(name: cstring, resultBuf: ptr posix.Protoent,
         buf: cstring, buflen: csize_t, res: ptr ptr posix.Protoent): cint {.
         importc, header: "<netdb.h>".}
@@ -224,6 +224,9 @@ proc getProtoByName*(name: string): int {.since: (1, 3, 5).} =
     var protoent: ptr posix.Protoent
     discard getprotobyname_r(name.cstring, addr pe,
         cast[cstring](addr buf[0]), csize_t(buf.len), addr protoent)
+  else:
+    # macOS: getprotobyname is thread-safe via TLS
+    let protoent = posix.getprotobyname(name.cstring)
 
   if protoent == nil:
     raise newException(OSError, "protocol not found: " & name)
@@ -370,7 +373,8 @@ proc getSockDomain*(socket: SocketHandle): Domain =
     raise newException(IOError, "Unknown socket family in getSockDomain")
 
 when not useNimNetLite:
-  when not useWinVersion:
+  # _r variants available on Linux (glibc + musl), not on macOS
+  when defined(linux):
     proc getservbyname_r(name, proto: cstring, resultBuf: ptr posix.Servent,
         buf: cstring, buflen: csize_t, res: ptr ptr posix.Servent): cint {.
         importc, header: "<netdb.h>".}
@@ -395,12 +399,14 @@ when not useNimNetLite:
     ## On posix this will search through the `/etc/services` file.
     when useWinVersion:
       var s = winlean.getservbyname(name, proto)
-    else:
+    elif defined(linux):
       var se: posix.Servent
       var buf: array[1024, char]
       var s: ptr posix.Servent
       discard getservbyname_r(name.cstring, proto.cstring, addr se,
           cast[cstring](addr buf[0]), csize_t(buf.len), addr s)
+    else:
+      var s = posix.getservbyname(name.cstring, proto.cstring)
     if s == nil: raiseOSError(osLastError(), "Service not found.")
     result = Servent(
       name: $s.s_name,
@@ -417,12 +423,14 @@ when not useNimNetLite:
     ## On posix this will search through the `/etc/services` file.
     when useWinVersion:
       var s = winlean.getservbyport(uint16(port).cint, proto)
-    else:
+    elif defined(linux):
       var se: posix.Servent
       var buf: array[1024, char]
       var s: ptr posix.Servent
       discard getservbyport_r(uint16(port).cint, proto.cstring, addr se,
           cast[cstring](addr buf[0]), csize_t(buf.len), addr s)
+    else:
+      var s = posix.getservbyport(uint16(port).cint, proto.cstring)
     if s == nil: raiseOSError(osLastError(), "Service not found.")
     result = Servent(
       name: $s.s_name,
@@ -456,7 +464,7 @@ when not useNimNetLite:
       var s = winlean.gethostbyaddr(cast[ptr InAddr](myAddr), addrLen.cuint,
                                     cint(family))
       if s == nil: raiseOSError(osLastError())
-    else:
+    elif defined(linux):
       var he: posix.Hostent
       var buf: array[4096, char]
       var h_errnop: cint
@@ -473,6 +481,11 @@ when not useNimNetLite:
                                 addr s, addr h_errnop)
       if s == nil:
         raiseOSError(osLastError(), $hstrerror(h_errnop))
+    else:
+      # macOS: gethostbyaddr is thread-safe via TLS
+      var s = posix.gethostbyaddr(myAddr, addrLen.SockLen, cint(family))
+      if s == nil:
+        raiseOSError(osLastError(), $hstrerror(h_errno))
 
     result = Hostent(
       name: $s.h_name,
@@ -515,7 +528,7 @@ when not useNimNetLite:
     ## This function will lookup the IP address of a hostname.
     when useWinVersion:
       var s = winlean.gethostbyname(name)
-    else:
+    elif defined(linux):
       var he: posix.Hostent
       var buf: array[4096, char]
       var h_errnop: cint
@@ -523,6 +536,9 @@ when not useNimNetLite:
       discard gethostbyname_r(name.cstring, addr he,
           cast[cstring](addr buf[0]), csize_t(buf.len),
           addr s, addr h_errnop)
+    else:
+      # macOS: gethostbyname is thread-safe via TLS
+      var s = posix.gethostbyname(name.cstring)
     if s == nil: raiseOSError(osLastError())
     result = Hostent(
       name: $s.h_name,
