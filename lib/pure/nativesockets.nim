@@ -18,20 +18,6 @@ import std/strbasics
 
 when defined(linux):
   import std/private/libcdetect
-  {.emit: """
-#include <features.h>
-#ifdef __GLIBC__
-#define NIM_HAS_GETPROTOBYNAME_R 1
-#ifndef NIM_IS_GLIBC
-#define NIM_IS_GLIBC NIM_TRUE
-#endif
-#else
-#define NIM_HAS_GETPROTOBYNAME_R 0
-#ifndef NIM_IS_GLIBC
-#define NIM_IS_GLIBC NIM_FALSE
-#endif
-#endif
-""".}
 
 when defined(nimPreviewSlimSystem):
   import std/[assertions, syncio]
@@ -228,41 +214,43 @@ proc toSockType*(protocol: Protocol): SockType =
   of IPPROTO_IP, IPPROTO_IPV6, IPPROTO_RAW, IPPROTO_ICMP, IPPROTO_ICMPV6:
     SOCK_RAW
 
-when defined(linux):
-  # musl has no getprotobyname_r; protect the non-reentrant call with a lock
+when defined(linux) and not isGlibc:
+  # musl: no getprotobyname_r and gethostbyname_r is unreliable;
+  # protect the non-reentrant calls with locks
   when compileOption("threads"):
     import std/locks
     var getprotobynameLock: Lock
     getprotobynameLock.initLock
+    var gethostbynameLock: Lock
+    gethostbynameLock.initLock
 
 proc getProtoByName*(name: string): int {.since: (1, 3, 5).} =
   ## Returns a protocol code from the database that matches the protocol `name`.
   when useWinVersion:
     let protoent = winlean.getprotobyname(name.cstring)
-  elif defined(linux):
+  elif defined(linux) and isGlibc:
     var pe: posix.Protoent
     var buf: array[1024, char]
     var protoent: ptr posix.Protoent
-    if isGlibc:
-      # glibc: use reentrant _r variant (guarded by #if so the symbol
-      # is not referenced on musl, where it doesn't exist)
-      var cname = name.cstring
-      {.emit: """
-      ;
-#if NIM_HAS_GETPROTOBYNAME_R
-      getprotobyname_r(`cname`, &`pe`, (char*)`buf`, sizeof(`buf`), &`protoent`);
-#endif
-      """.}
+    # glibc: use reentrant _r variant
+    proc getprotobyname_r(name: cstring, resultBuf: ptr posix.Protoent,
+                          buf: cstring, buflen: csize_t,
+                          result: ptr ptr posix.Protoent): cint
+      {.importc, header: "<netdb.h>".}
+    discard getprotobyname_r(name.cstring, addr pe, cast[cstring](addr buf[0]),
+                             csize_t(sizeof(buf)), addr protoent)
+  elif defined(linux):
+    var pe: posix.Protoent
+    var protoent: ptr posix.Protoent
+    # musl: no _r variant, no TLS — use a lock
+    when compileOption("threads"):
+      getprotobynameLock.withLock:
+        let p = posix.getprotobyname(name.cstring)
+        if p != nil:
+          pe = p[]
+          protoent = addr pe
     else:
-      # musl: no _r variant, no TLS — use a lock
-      when compileOption("threads"):
-        getprotobynameLock.withLock:
-          let p = posix.getprotobyname(name.cstring)
-          if p != nil:
-            pe = p[]
-            protoent = addr pe
-      else:
-        protoent = posix.getprotobyname(name.cstring)
+      protoent = posix.getprotobyname(name.cstring)
   else:
     # macOS/BSD: getprotobyname is thread-safe via TLS
     let protoent = posix.getprotobyname(name.cstring)
@@ -567,7 +555,7 @@ when not useNimNetLite:
     ## This function will lookup the IP address of a hostname.
     when useWinVersion:
       var s = winlean.gethostbyname(name)
-    elif defined(linux):
+    elif defined(linux) and isGlibc:
       var he: posix.Hostent
       var buf: array[4096, char]
       var h_errnop: cint
@@ -575,33 +563,86 @@ when not useNimNetLite:
       discard gethostbyname_r(name.cstring, addr he,
           cast[cstring](addr buf[0]), csize_t(buf.len),
           addr s, addr h_errnop)
+    elif defined(linux):
+      # musl: gethostbyname_r is unreliable, use lock-protected gethostbyname
+      when compileOption("threads"):
+        gethostbynameLock.withLock:
+          var s = posix.gethostbyname(name.cstring)
+          if s == nil: raiseOSError(osLastError())
+          result = Hostent(
+            name: $s.h_name,
+            aliases: cstringArrayToSeq(s.h_aliases)
+          )
+          if s.h_addrtype == posix.AF_INET:
+            result.addrtype = AF_INET
+          elif s.h_addrtype == posix.AF_INET6:
+            result.addrtype = AF_INET6
+          else:
+            raiseOSError(osLastError(), "unknown h_addrtype")
+          if result.addrtype == AF_INET:
+            result.addrList = @[]
+            var i = 0
+            while not isNil(s.h_addr_list[i]):
+              var inaddrPtr = cast[ptr InAddr](s.h_addr_list[i])
+              result.addrList.add($inet_ntoa(inaddrPtr[]))
+              inc(i)
+          else:
+            result.addrList = cstringArrayToSeq(s.h_addr_list)
+          result.length = int(s.h_length)
+        return
+      else:
+        var s = posix.gethostbyname(name.cstring)
+        if s == nil: raiseOSError(osLastError())
+        result = Hostent(
+          name: $s.h_name,
+          aliases: cstringArrayToSeq(s.h_aliases)
+        )
+        if s.h_addrtype == posix.AF_INET:
+          result.addrtype = AF_INET
+        elif s.h_addrtype == posix.AF_INET6:
+          result.addrtype = AF_INET6
+        else:
+          raiseOSError(osLastError(), "unknown h_addrtype")
+        if result.addrtype == AF_INET:
+          result.addrList = @[]
+          var i = 0
+          while not isNil(s.h_addr_list[i]):
+            var inaddrPtr = cast[ptr InAddr](s.h_addr_list[i])
+            result.addrList.add($inet_ntoa(inaddrPtr[]))
+            inc(i)
+        else:
+          result.addrList = cstringArrayToSeq(s.h_addr_list)
+        result.length = int(s.h_length)
+        return
     else:
       # macOS: gethostbyname is thread-safe via TLS
       var s = posix.gethostbyname(name.cstring)
-    if s == nil: raiseOSError(osLastError())
-    result = Hostent(
-      name: $s.h_name,
-      aliases: cstringArrayToSeq(s.h_aliases)
-    )
-    when useWinVersion:
-      result.addrtype = Domain(s.h_addrtype)
-    else:
-      if s.h_addrtype == posix.AF_INET:
-        result.addrtype = AF_INET
-      elif s.h_addrtype == posix.AF_INET6:
-        result.addrtype = AF_INET6
+    when not (defined(linux) and not isGlibc):
+      # musl Linux paths return early above; shared code is for Windows/glibc/macOS
+      if s == nil: raiseOSError(osLastError())
+      result = Hostent(
+        name: $s.h_name,
+        aliases: cstringArrayToSeq(s.h_aliases)
+      )
+      when useWinVersion:
+        result.addrtype = Domain(s.h_addrtype)
       else:
-        raiseOSError(osLastError(), "unknown h_addrtype")
-    if result.addrtype == AF_INET:
-      result.addrList = @[]
-      var i = 0
-      while not isNil(s.h_addr_list[i]):
-        var inaddrPtr = cast[ptr InAddr](s.h_addr_list[i])
-        result.addrList.add($inet_ntoa(inaddrPtr[]))
-        inc(i)
-    else:
-      result.addrList = cstringArrayToSeq(s.h_addr_list)
-    result.length = int(s.h_length)
+        if s.h_addrtype == posix.AF_INET:
+          result.addrtype = AF_INET
+        elif s.h_addrtype == posix.AF_INET6:
+          result.addrtype = AF_INET6
+        else:
+          raiseOSError(osLastError(), "unknown h_addrtype")
+      if result.addrtype == AF_INET:
+        result.addrList = @[]
+        var i = 0
+        while not isNil(s.h_addr_list[i]):
+          var inaddrPtr = cast[ptr InAddr](s.h_addr_list[i])
+          result.addrList.add($inet_ntoa(inaddrPtr[]))
+          inc(i)
+      else:
+        result.addrList = cstringArrayToSeq(s.h_addr_list)
+      result.length = int(s.h_length)
 
   proc getHostname*(): string {.tags: [ReadIOEffect].} =
     ## Returns the local hostname (not the FQDN)
