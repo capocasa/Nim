@@ -400,7 +400,9 @@ proc getSockDomain*(socket: SocketHandle): Domain =
 
 when not useNimNetLite:
   # _r variants available on Linux (glibc + musl), not on macOS
-  when defined(linux):
+  # Guard with `not useWinVersion` because nimdoc sets useWinVersion=true,
+  # which skips the posix import — so posix types would be undeclared.
+  when not useWinVersion and defined(linux):
     proc getservbyname_r(name, proto: cstring, resultBuf: ptr posix.Servent,
         buf: cstring, buflen: csize_t, res: ptr ptr posix.Servent): cint {.
         importc, header: "<netdb.h>".}
