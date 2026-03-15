@@ -16,28 +16,30 @@
 when defined(linux):
   import std/compilesettings
 
-  import std/strutils
+  import std/strscans
 
-  func extractGccExe(cmdLine: string): string {.compileTime.} =
-    ## Extract ``--gcc.exe:VALUE`` from the Nim command line.
-    const flag = "--gcc.exe:"
-    var i = cmdLine.find(flag)
-    if i < 0: return ""
-    i += flag.len
-    # Handle quoted values
-    if i < cmdLine.len and cmdLine[i] == '"':
-      inc i
-      let j = cmdLine.find('"', i)
-      if j >= 0: return cmdLine[i ..< j]
-      return cmdLine[i .. ^1]
-    # Unquoted: take until whitespace
-    var j = i
-    while j < cmdLine.len and cmdLine[j] != ' ': inc j
-    return cmdLine[i ..< j]
+  proc quotedOrWord(input: string; strVal: var string; start: int): int =
+    ## Matches a quoted string or unquoted word (until space/end).
+    if start < input.len and input[start] == '"':
+      var i = start + 1
+      while i < input.len and input[i] != '"': inc i
+      if i < input.len:
+        strVal = input[start + 1 ..< i]
+        return i + 1 - start
+    else:
+      var i = start
+      while i < input.len and input[i] != ' ': inc i
+      if i > start:
+        strVal = input[start ..< i]
+        return i - start
 
   const
-    nimCC = extractGccExe(querySetting(SingleValueSetting.commandLine))
-    cc = if nimCC.len > 0: nimCC else: "${CC:-cc}"
+    cc = block:
+      var prefix, nimCC: string
+      discard scanf(querySetting(SingleValueSetting.commandLine),
+                    "$*--gcc.exe:${quotedOrWord}", prefix, nimCC)
+      if nimCC.len > 0: nimCC else: "${CC:-cc}"
+    # gorgeEx is the only way to query C preprocessor macros at compile time
     isGlibc* = gorgeEx(
       "printf '#include <features.h>\\n' | " & cc &
         " -E -dM - 2>/dev/null | grep -q __GLIBC__"

@@ -214,7 +214,7 @@ proc toSockType*(protocol: Protocol): SockType =
   of IPPROTO_IP, IPPROTO_IPV6, IPPROTO_RAW, IPPROTO_ICMP, IPPROTO_ICMPV6:
     SOCK_RAW
 
-when defined(linux):
+when not useWinVersion and defined(linux):
   when not isGlibc:
     # musl: no getprotobyname_r and gethostbyname_r is unreliable;
     # protect the non-reentrant calls with locks

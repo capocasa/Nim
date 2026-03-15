@@ -242,9 +242,6 @@ when defined(js):
 elif defined(posix):
   import std/posix
 
-  # localtime_r doesn't call tzset() implicitly unlike localtime().
-  # tzset() must be called before localtime_r to pick up TZ changes.
-
   type CTime = posix.Time
 
   when defined(macosx):
@@ -1339,6 +1336,8 @@ else:
       if localtime_s(addr tm, a) != 0:
         return (0, false)
     else:
+      # localtime_r doesn't call tzset() implicitly unlike localtime().
+      # tzset() must be called before localtime_r to pick up TZ changes.
       tzset()
       if localtime_r(a, tm).isNil:
         return (0, false)
