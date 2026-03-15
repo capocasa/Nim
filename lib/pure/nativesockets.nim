@@ -224,6 +224,11 @@ when defined(linux):
       getprotobynameLock.initLock
       var gethostbynameLock: Lock
       gethostbynameLock.initLock
+  when isGlibc:
+    proc getprotobyname_r(name: cstring, resultBuf: ptr posix.Protoent,
+                          buf: cstring, buflen: csize_t,
+                          result: ptr ptr posix.Protoent): cint
+      {.importc, header: "<netdb.h>".}
 
 proc getProtoByName*(name: string): int {.since: (1, 3, 5).} =
   ## Returns a protocol code from the database that matches the protocol `name`.
@@ -234,12 +239,8 @@ proc getProtoByName*(name: string): int {.since: (1, 3, 5).} =
     var protoent: ptr posix.Protoent
     when isGlibc:
       var buf: array[1024, char]
-      proc getprotobyname_r(name: cstring, resultBuf: ptr posix.Protoent,
-                            buf: cstring, buflen: csize_t,
-                            result: ptr ptr posix.Protoent): cint
-        {.importc, header: "<netdb.h>".}
       discard getprotobyname_r(name.cstring, addr pe, cast[cstring](addr buf[0]),
-                               csize_t(sizeof(buf)), addr protoent)
+                               csize_t(buf.len), addr protoent)
     else:
       # musl: no _r variant — use a lock
       when compileOption("threads"):
@@ -410,14 +411,15 @@ when not useNimNetLite:
         buf: cstring, buflen: csize_t, res: ptr ptr posix.Servent): cint {.
         importc, header: "<netdb.h>".}
 
-    proc gethostbyname_r(name: cstring, ret: ptr posix.Hostent,
-        buf: cstring, buflen: csize_t, res: ptr ptr posix.Hostent,
-        h_errnop: ptr cint): cint {.importc, header: "<netdb.h>".}
     proc gethostbyaddr_r(
         a1: pointer, a2: SockLen, a3: cint,
         ret: ptr posix.Hostent, buf: cstring, buflen: csize_t,
         res: ptr ptr posix.Hostent, h_errnop: ptr cint): cint {.
         importc, header: "<netdb.h>".}
+    when isGlibc:
+      proc gethostbyname_r(name: cstring, ret: ptr posix.Hostent,
+          buf: cstring, buflen: csize_t, res: ptr ptr posix.Hostent,
+          h_errnop: ptr cint): cint {.importc, header: "<netdb.h>".}
 
   proc getServByName*(name, proto: string): Servent {.tags: [ReadIOEffect].} =
     ## Searches the database from the beginning and finds the first entry for
@@ -434,7 +436,7 @@ when not useNimNetLite:
       discard getservbyname_r(name.cstring, proto.cstring, addr se,
           cast[cstring](addr buf[0]), csize_t(buf.len), addr s)
     else:
-      var s = posix.getservbyname(name.cstring, proto.cstring)
+      var s = posix.getservbyname(name, proto)
     if s == nil: raiseOSError(osLastError(), "Service not found.")
     result = Servent(
       name: $s.s_name,
@@ -458,7 +460,7 @@ when not useNimNetLite:
       discard getservbyport_r(uint16(port).cint, proto.cstring, addr se,
           cast[cstring](addr buf[0]), csize_t(buf.len), addr s)
     else:
-      var s = posix.getservbyport(uint16(port).cint, proto.cstring)
+      var s = posix.getservbyport(uint16(port).cint, proto)
     if s == nil: raiseOSError(osLastError(), "Service not found.")
     result = Servent(
       name: $s.s_name,
