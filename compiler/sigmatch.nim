@@ -1892,6 +1892,7 @@ proc typeRel(c: var TCandidate, f, aOrig: PType,
       result = isNone
       let oldInheritancePenalty = c.inheritancePenalty
       var minInheritance = maxInheritancePenalty
+      var intLitBranch: PType = nil
       for branch in f.kids:
         c.inheritancePenalty = -1
         let x = typeRel(c, branch, aOrig, flags)
@@ -1899,12 +1900,23 @@ proc typeRel(c: var TCandidate, f, aOrig: PType,
           if  c.inheritancePenalty > -1:
             minInheritance = min(minInheritance, c.inheritancePenalty)
           result = x
+        if x == isFromIntLit and intLitBranch == nil:
+          # remember the branch that accepted the int literal, so it can be
+          # bound below: binding the literal's base type instead would
+          # circumvent the constraint, see bug #1214
+          intLitBranch = branch
       c.inheritancePenalty = oldInheritancePenalty
       if result >= isIntConv:
         if minInheritance < maxInheritancePenalty:
           inc c.inheritancePenalty, minInheritance + ord(c.inheritancePenalty < 0)
+        if doBind:
+          let bound = if result == isFromIntLit and intLitBranch != nil:
+            intLitBranch
+          else:
+            aOrig.skipTypes({tyRange}).skipIntLit(c.c.idgen)
+          put(c, f, bound)
         if result > isGeneric: result = isGeneric
-        bindingRet result
+        return result
       else:
         result = isNone
   of tyNot:
@@ -2048,7 +2060,23 @@ proc typeRel(c: var TCandidate, f, aOrig: PType,
           if concrete == nil:
             return isNone
         if doBindGP:
-          put(c, f, concrete)
+          if a.isIntLit and f.len > 0 and f[0].kind == tyOr:
+            # if the literal's base type is itself a branch (e.g. `int` in
+            # `SomeInteger`), it matches exactly and the base type is bound;
+            # otherwise bind the branch that accepted the literal, else the
+            # constraint is circumvented (#1214)
+            let oldPenalty = c.inheritancePenalty
+            var bestRel = isNone
+            var litBranch: PType = nil
+            for branch in f[0].kids:
+              let rel = typeRel(c, branch, a, flags + {trDontBind})
+              if rel > bestRel:
+                bestRel = rel
+                litBranch = if rel == isFromIntLit: branch else: nil
+            c.inheritancePenalty = oldPenalty
+            put(c, f, if bestRel == isFromIntLit and litBranch != nil: litBranch else: concrete)
+          else:
+            put(c, f, concrete)
       elif result > isGeneric:
         result = isGeneric
     elif a.kind == tyEmpty:
